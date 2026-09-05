@@ -48,7 +48,7 @@ Windows 版本已完成 EXE 构建，待上传到 v0.1.2 Release；上传完成�
 
 如果不想手动安装 Node.js、pnpm 或 DSH，可以直接下载自带完整运行时的 macOS 通用 DMG：
 
-[下载最新 Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
+[下载最新 Dockyard DSH DMG](https://github.com/meyaomiao/dsh-oauth-mac/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
 
 也可以在 Mac 上自行构建：
 
@@ -65,7 +65,7 @@ DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击
 如果已经有 Node.js，直接把下面这一行交给终端或智能体执行即可：
 
 ```sh
-npx -y @dockyard-dsh/install@latest
+npx -y dsh-oauth-mac-install@latest
 ```
 
 它会自动检查 DSH 和 pnpm，并把预构建的 Dockyard host/client bundle 安装到默认 `web` profile。安装完成后重启 DSH Web。
@@ -93,7 +93,7 @@ pnpm --version
 `web` 是 DSH 自带的完整 Web profile；不要新建只包含 Dockyard bundle 的空 profile，否则不会启动 Web GUI。
 
 ```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh
+dsh plugin --profile web add github:meyaomiao/dsh-oauth-mac
 dsh web
 ```
 
@@ -106,7 +106,7 @@ dsh web --dump-config
 如需固定版本，建议 pin 到已验证的 commit：
 
 ```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
+dsh plugin --profile web add github:meyaomiao/dsh-oauth-mac#<commit-sha>
 ```
 
 当前发布 commit 已提交可运行的 host/client bundle，安装时不执行 `prepare`，因此 GitHub 直装不需要额外的 `allowBuilds` 配置。若你 pin 到旧 commit，或 pnpm 明确报告了其他构建脚本，请只在检查源码后按终端提示配置对应 profile 的 `pnpm-workspace.yaml`。
@@ -114,7 +114,7 @@ dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
 #### 需要本地修改时：克隆后安装
 
 ```sh
-git clone https://github.com/AITabby/dockyard-dsh.git
+git clone https://github.com/meyaomiao/dsh-oauth-mac.git
 cd dockyard-dsh
 npm install
 npm test                 # 可选：验证环境
@@ -250,7 +250,7 @@ The Windows EXE build is complete and waiting to be uploaded to the v0.1.2 relea
 
 If you do not want to install Node.js, pnpm, or DSH manually, download the self-contained universal DMG:
 
-[Download the latest Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
+[Download the latest Dockyard DSH DMG](https://github.com/meyaomiao/dsh-oauth-mac/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
 
 Or build it on macOS:
 
@@ -265,7 +265,7 @@ The DMG embeds Node.js, the DSH CLI, the complete `web` profile, and the Dockyar
 If Node.js is already available, give this single command to a terminal or an agent:
 
 ```sh
-npx -y @dockyard-dsh/install@latest
+npx -y dsh-oauth-mac-install@latest
 ```
 
 It checks for DSH and pnpm, then installs the prebuilt Dockyard host/client bundle into the default `web` profile. Restart DSH Web after installation.
@@ -291,7 +291,7 @@ Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai
 `web` is DSH's complete built-in Web profile. Do not create an empty custom profile if you want the GUI.
 
 ```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh
+dsh plugin --profile web add github:meyaomiao/dsh-oauth-mac
 dsh web
 ```
 
@@ -304,7 +304,7 @@ dsh web --dump-config
 For a reproducible install, pin a verified commit:
 
 ```sh
-dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
+dsh plugin --profile web add github:meyaomiao/dsh-oauth-mac#<commit-sha>
 ```
 
 The current release commit includes the runnable host/client bundles and does not run `prepare` at install time, so a direct GitHub install does not need an extra `allowBuilds` setting. If you pin an older commit, or pnpm explicitly reports another build hook, inspect the source and follow the exact profile configuration printed by the command.
@@ -312,7 +312,7 @@ The current release commit includes the runnable host/client bundles and does no
 #### When you need local changes: clone and install
 
 ```sh
-git clone https://github.com/AITabby/dockyard-dsh.git
+git clone https://github.com/meyaomiao/dsh-oauth-mac.git
 cd dockyard-dsh
 npm install
 npm test                 # optional environment check
