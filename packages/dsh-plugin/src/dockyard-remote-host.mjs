@@ -47,6 +47,12 @@ export class DockyardRemoteService extends TypertRemoteService {
     return envelope(result, await this.dockyard.snapshot());
   }
 
+  async refreshCatalog(request = {}) {
+    const providerId = request?.providerId ?? null;
+    const result = await this.dockyard.refreshCatalog(providerId);
+    return envelope(result, await this.dockyard.snapshot());
+  }
+
   async scan(request = {}) {
     const result = await this.dockyard.scan(request?.providerId ?? null);
     return envelope(result, await this.dockyard.snapshot());
@@ -129,14 +135,23 @@ export class DockyardRemoteService extends TypertRemoteService {
     // 或 OAuth accountId 共用同一台账键空间）。
     return this.nativeKeyPool.resetUsage(request.providerId, request.ref ?? null);
   }
+
+  async getContextWindowOverride(request = {}) {
+    return this.dockyard.getContextWindowOverride(request);
+  }
+
+  async setContextWindowOverride(request = {}) {
+    return this.dockyard.setContextWindowOverride(request, request.value);
+  }
 }
 
 function markRemoteMethods() {
   const target = Object.create(DockyardRemoteService.prototype);
   for (const name of [
-    "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
+    "snapshot", "refresh", "refreshCatalog", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
     "usageReset",
+    "getContextWindowOverride", "setContextWindowOverride",
   ]) {
     let initializer;
     Remote(name)(undefined, {

@@ -34,7 +34,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 
 ### 平台支持：macOS 已发布，Windows 构建完成
 
-**当前发布版本已提供 macOS DMG；Windows EXE 已完成构建，正在上传到 v0.1.1 Release。**
+**当前 0.1.2 版本正在整理；macOS DMG 已提供，Windows EXE 已完成构建，待上传到 v0.1.2 Release。**
 
 macOS 完整功能依赖以下原生能力：
 
@@ -42,7 +42,7 @@ macOS 完整功能依赖以下原生能力：
 - 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
 - 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
 
-Windows 版本已完成 EXE 构建，当前正在上传到 v0.1.1 Release；上传完成后再进行发布页下载验证。
+Windows 版本已完成 EXE 构建，待上传到 v0.1.2 Release；上传完成后再进行发布页下载验证。
 
 ### macOS 独立应用与 DMG
 
@@ -60,6 +60,16 @@ DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击
 
 仍需注意：这是 macOS 专用、当前为本地 ad-hoc 签名的开发预览；某些 provider 的官方 CLI 扫描/兼容性 fallback 仍可能需要对应 CLI，Antigravity 浏览器授权仍需要配置官方 OAuth client 信息。
 
+### 一条命令安装 Dockyard plugin
+
+如果已经有 Node.js，直接把下面这一行交给终端或智能体执行即可：
+
+```sh
+npx -y @dockyard-dsh/install@latest
+```
+
+它会自动检查 DSH 和 pnpm，并把预构建的 Dockyard host/client bundle 安装到默认 `web` profile。安装完成后重启 DSH Web。
+
 ### 从源码安装 Dockyard plugin / Web profile
 
 Dockyard DSH 作为源码 plugin 安装到已有 DSH Web profile 时，才需要先安装 DSH CLI，并确认 `dsh` 命令可用。
@@ -76,7 +86,7 @@ dsh --version
 pnpm --version
 ```
 
-上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。当前 bundle 已按 `@deepseek-ai/dsh@0.1.0-rc.6` 验证。
+上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。当前 bundle 已按 `@deepseek-ai/dsh@0.1.1-rc.2` 验证。DSH 仍处于 developer preview，升级已有 DSH_HOME 前请先备份数据，并先用独立的 `DSH_HOME` 验证。
 
 #### 最简便的方式：直接安装到 DSH Web profile
 
@@ -226,7 +236,7 @@ When an official client, CLI, or OAuth source is missing or not signed in, Docky
 
 ### Platform support: macOS released, Windows build complete
 
-**The current release includes the macOS DMG. The Windows EXE is built and is being uploaded to the v0.1.1 release.**
+**The 0.1.2 release is being prepared. The macOS DMG is available; the Windows EXE is built and waiting to be uploaded to the v0.1.2 release.**
 
 The macOS integration depends on native behavior:
 
@@ -234,7 +244,7 @@ The macOS integration depends on native behavior:
 - Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
 - Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
 
-The Windows EXE build is complete and is currently being uploaded to the v0.1.1 release; download verification will follow after the upload finishes.
+The Windows EXE build is complete and waiting to be uploaded to the v0.1.2 release; download verification will follow after the upload finishes.
 
 ### Standalone macOS app and DMG
 
@@ -250,6 +260,16 @@ Or build it on macOS:
 
 The DMG embeds Node.js, the DSH CLI, the complete `web` profile, and the Dockyard plugin. Launching the app is enough; no separate Node.js, pnpm, or DSH installation is required. OAuth authorization pages open in the system default browser. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices. This is a macOS-only developer preview with a local ad-hoc signature; some provider CLI scan/compatibility fallbacks still require their provider CLI, and Antigravity browser OAuth still requires the official OAuth client configuration.
 
+### One-command Dockyard plugin install
+
+If Node.js is already available, give this single command to a terminal or an agent:
+
+```sh
+npx -y @dockyard-dsh/install@latest
+```
+
+It checks for DSH and pnpm, then installs the prebuilt Dockyard host/client bundle into the default `web` profile. Restart DSH Web after installation.
+
 ### Installing the source plugin into an existing DSH Web profile
 
 Dockyard DSH is a DSH plugin, not a standalone agent. This prerequisite applies when installing the source plugin into an existing DSH profile; install the DSH CLI first and verify that the `dsh` command is available:
@@ -264,7 +284,7 @@ dsh --version
 pnpm --version
 ```
 
-Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes. The current bundle is verified against `@deepseek-ai/dsh@0.1.0-rc.6`.
+Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes. The current bundle is verified against `@deepseek-ai/dsh@0.1.1-rc.2`. DSH remains in developer preview; back up an existing DSH_HOME and verify with an isolated DSH_HOME before upgrading it.
 
 #### Shortest path: install directly into the DSH Web profile
 

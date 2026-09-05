@@ -10,7 +10,13 @@ import { createBrowserOAuthAuthorizer } from "../packages/oauth/src/browser-oaut
 import { createCliOAuthAuthorizer } from "../packages/oauth/src/cli-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../packages/oauth/src/cli-status-authorizer.mjs";
 import { createOfficialSessionAuthorizer } from "../packages/oauth/src/official-session-authorizer.mjs";
-import { createCodexDriver, createCodexPiAiExecutor } from "../modules/provider-codex/src/index.mjs";
+import {
+  createCodexDriver,
+  createCodexPiAiExecutor,
+  mergeCodexLiveCatalog,
+  parseCodexLiveModelCatalog,
+  synthesizeCodexPiAiModel,
+} from "../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
   createAntigravityCliExecutor,
@@ -21,7 +27,9 @@ import {
   extractAntigravityAccountEmail,
   antigravityRequestPrompt,
   parseAntigravityNativeQuota,
+  parseAntigravityKeychainValue,
   parseAntigravityModelCatalog,
+  readAntigravityTokenFile,
   resolveAntigravityInvocationModel,
   resolveAntigravityNativeInvocationModel,
 } from "../modules/provider-antigravity/src/index.mjs";
@@ -49,6 +57,7 @@ import {
 } from "../modules/provider-cursor/src/index.mjs";
 import { frameConnectMessage, decodeCursorConnectTrailer } from "../modules/provider-cursor/src/native-protocol.mjs";
 import { codexModelToDshCatalog } from "../packages/dsh-plugin/src/codex-transport.mjs";
+import { cliEventText } from "../packages/providers/src/cli-agent-transport.mjs";
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -113,8 +122,128 @@ test("Codex driver imports local OAuth and parses live multi-window quota", asyn
   }
 });
 
-test("Codex PiAI transport forwards DSH durable attachments", async () => {
-  let adapterOptions;
+test("Codex live model catalog parse hides entries and sorts by priority", () => {
+  const models = parseCodexLiveModelCatalog({
+    models: [
+      { slug: "gpt-5.4", priority: 20 },
+      { slug: "secret", visibility: "hidden", priority: 1 },
+      { slug: "gpt-6", priority: 10, display_name: "GPT-6" },
+      { slug: "gpt-6" },
+    ],
+  });
+  assert.deepEqual(models.map((model) => model.id), ["gpt-6", "gpt-5.4"]);
+  assert.equal(models[0].name, "GPT-6");
+});
+
+test("Codex live merge synthesizes registry-backed capacities for unknown slugs", () => {
+  const registry = [{
+    id: "gpt-5.6-luna",
+    name: "GPT-5.6 Luna",
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    input: ["text", "image"],
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  }];
+  const merged = mergeCodexLiveCatalog([{ id: "gpt-6", name: "GPT-6" }, { id: "gpt-5.6-luna" }], registry);
+  const gpt6 = merged.find((model) => model.id === "gpt-6");
+  assert.equal(gpt6.name, "GPT-6");
+  assert.equal(gpt6.contextWindow, 272_000);
+  assert.equal(gpt6.maxTokens, 128_000);
+  assert.deepEqual(gpt6.thinkingLevelMap, { xhigh: "xhigh", minimal: "low" });
+  assert.equal(gpt6.api, "openai-codex-responses");
+  const known = merged.find((model) => model.id === "gpt-5.6-luna");
+  assert.equal(known.name, "GPT-5.6 Luna");
+});
+
+test("Codex driver fetches the official live model catalog with account headers", async () => {
+  let seen;
+  const registry = [{
+    id: "gpt-5.4",
+    name: "GPT-5.4",
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    input: ["text", "image"],
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", minimal: "low" },
+  }];
+  const driver = createCodexDriver({
+    fetchImpl: async (url, init = {}) => {
+      seen = { url, headers: init.headers ?? {} };
+      return response(200, { models: [
+        { slug: "gpt-5.4", priority: 20 },
+        { slug: "gpt-6", priority: 10, display_name: "GPT-6" },
+        { slug: "secret", visibility: "hidden", priority: 1 },
+      ] });
+    },
+    catalogLoader: async () => ({ models: registry, source: "dsh_pi_ai_provider_catalog" }),
+  });
+  const secretStore = new MemorySecretStore();
+  const access = jwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-live", chatgpt_plan_type: "pro" },
+  });
+  const [account] = await driver.importSource({
+    content: JSON.stringify({
+      tokens: { access_token: access, refresh_token: "refresh-live", account_id: "acct-live" },
+    }),
+  }, { secretStore });
+  const catalog = await driver.getCatalog({ accounts: [account], secretStore });
+  assert.match(seen.url, /chatgpt\.com\/backend-api\/codex\/models/);
+  assert.equal(seen.headers.authorization, `Bearer ${access}`);
+  assert.equal(seen.headers["chatgpt-account-id"], "acct-live");
+  assert.equal(catalog.source, "official_codex_models_api");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gpt-6", "gpt-5.4"]);
+  const gpt6 = catalog.models[0];
+  assert.equal(gpt6.name, "GPT-6");
+  assert.equal(gpt6.contextWindow, 272_000);
+  assert.equal(gpt6.maxTokens, 128_000);
+});
+
+test("Codex driver falls back to the registry catalog when the live endpoint fails", async () => {
+  const registry = [{ id: "gpt-5.4", name: "GPT-5.4", contextWindow: 272_000, maxTokens: 128_000 }];
+  const driver = createCodexDriver({
+    fetchImpl: async () => response(500, {}),
+    catalogLoader: async () => ({ models: registry, source: "dsh_pi_ai_provider_catalog" }),
+  });
+  const secretStore = new MemorySecretStore();
+  const access = jwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct-live" },
+  });
+  const [account] = await driver.importSource({
+    content: JSON.stringify({
+      tokens: { access_token: access, refresh_token: "refresh-live", account_id: "acct-live" },
+    }),
+  }, { secretStore });
+  const catalog = await driver.getCatalog({ accounts: [account], secretStore });
+  assert.equal(catalog.source, "dsh_pi_ai_provider_catalog");
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gpt-5.4"]);
+});
+
+test("Codex executor synthesizes capacities for slugs missing from the registry", async () => {
+  class StubPiAiAdapter {
+    stream(request) { return "stream-result"; }
+  }
+  const executor = createCodexPiAiExecutor({
+    PiAiAdapter: StubPiAiAdapter,
+    createProvider: (options) => options,
+    openAICodexResponsesApi: () => ({}),
+    modelResolver: () => null,
+    registryModels: [],
+  });
+  await executor({
+    request: { model: "gpt-6", input: [{ type: "text", text: "hello" }] },
+    credential: { access: "oauth-access" },
+    context: {},
+  });
+  const synthesized = synthesizeCodexPiAiModel("gpt-6", []);
+  assert.equal(synthesized.contextWindow, 272_000);
+  assert.equal(synthesized.maxTokens, 128_000);
+  assert.equal(synthesized.api, "openai-codex-responses");
+});
+
+test("Codex PiAI transport forwards DSH durable attachments", async () => {  let adapterOptions;
   let streamedRequest;
   class StubPiAiAdapter {
     constructor(options) {
@@ -361,6 +490,31 @@ test("browser OAuth rejects callbacks and pasted codes without matching state", 
   assert.match(pastedResult.diagnostic, /OAuth state 校验失败/);
 });
 
+test("browser OAuth cancellation wins a concurrent exchange", async () => {
+  let request;
+  let release;
+  let imports = 0;
+  const authorizer = createBrowserOAuthAuthorizer({
+    providerId: "test-browser-cancel-provider",
+    redirectUri: "https://example.test/oauth/callback",
+    callbackPort: null,
+    authorizationUrlBuilder: async (value) => {
+      request = value;
+      return "https://example.test/authorize";
+    },
+    exchangeCode: async () => new Promise((resolve) => { release = () => resolve({ access_token: "late" }); }),
+    importCredentials: async () => { imports += 1; return [{ accountId: "late" }]; },
+  });
+  const started = await authorizer.begin();
+  const submitted = authorizer.submitAuthorizationCode(started.sessionId, `code#${request.state}`);
+  const cancelled = await authorizer.cancel(started.sessionId);
+  assert.equal(cancelled.status, "cancelled");
+  release?.();
+  const result = await submitted;
+  assert.equal(result.status, "cancelled");
+  assert.equal(imports, 0);
+});
+
 test("official client session authorizer polls a provider-owned desktop session", async () => {
   let ready = false;
   const authorizer = createOfficialSessionAuthorizer({
@@ -406,6 +560,7 @@ test("Antigravity OAuth authorizer captures agy's browser URL and imports its is
   assert.equal(result.authorizationUrl, "https://accounts.google.com/o/oauth2/auth?state=test&code_challenge=test");
   assert.equal(result.accounts[0].resources.sessionPersistence, "captured");
   assert.equal(result.accounts[0].resources.sessionSource, "browser");
+  assert.equal(result.accounts[0].resources.credentialRefreshMode, "agy_session");
   assert.equal(result.accounts[0].source, "official_antigravity_browser_oauth");
   assert.equal(started.browserOpened, true);
 });
@@ -427,6 +582,51 @@ test("Antigravity OAuth authorizer reports submitted codes as processing", async
   assert.match(submitted.instructions, /正在等待官方登录完成/);
   assert.deepEqual(writes, ["fresh-code\n"]);
   await authorizer.cancel(started.sessionId);
+});
+
+test("Antigravity decodes the official go-keyring Keychain session", () => {
+  const encoded = Buffer.from(JSON.stringify({
+    auth_method: "consumer",
+    token: {
+      access_token: "keychain-access",
+      refresh_token: "keychain-refresh",
+      expiry: "2026-08-27T04:00:00.000Z",
+    },
+  })).toString("base64");
+  assert.deepEqual(parseAntigravityKeychainValue(`go-keyring-base64:${encoded}`), {
+    token: "keychain-access",
+    refreshToken: "keychain-refresh",
+    expiresAt: "2026-08-27T04:00:00.000Z",
+    kind: "oauth",
+    source: "antigravity_keychain",
+    email: null,
+  });
+});
+
+test("Antigravity token files retain the OAuth refresh token and expiry", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-antigravity-token-file-"));
+  try {
+    const tokenPath = join(home, "antigravity-oauth-token.json");
+    await writeFile(tokenPath, JSON.stringify({
+      credentials: {
+        access_token: "google-access",
+        refresh_token: "google-refresh",
+        expiry_date: Date.parse("2026-08-25T00:00:00.000Z"),
+      },
+    }));
+    assert.deepEqual(readAntigravityTokenFile({
+      env: { DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath },
+      home,
+    }), {
+      token: "google-access",
+      refreshToken: "google-refresh",
+      expiresAt: "2026-08-25T00:00:00.000Z",
+      kind: "oauth",
+      email: null,
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity driver uses official CLI data without requiring token storage", async () => {
@@ -573,6 +773,7 @@ test("Antigravity does not fall back to the global CLI quota for a selected acco
     quotaReader: async () => {
       throw new Error("selected account quota unavailable");
     },
+    tokenResolver: () => null,
     commandRunner: async () => {
       cliCalls += 1;
       throw new Error("global CLI must not be used");
@@ -603,6 +804,8 @@ test("Antigravity browser OAuth refreshes persisted Google credentials after res
   const driver = createAntigravityDriver({
     cliPath: "missing-agy",
     commandRunner: async () => { throw new Error("CLI must not be used for persisted browser OAuth"); },
+    clientId: "dockyard-google-client",
+    clientSecret: "dockyard-google-secret",
     quotaReader: async ({ credential }) => {
       quotaCredential = credential;
       return {
@@ -637,6 +840,151 @@ test("Antigravity browser OAuth refreshes persisted Google credentials after res
   assert.equal(refreshed.quota.remaining, 0.8);
   assert.equal((await secretStore.read(credentialRef)).access, "refreshed-access");
   assert.equal((await secretStore.read(credentialRef)).refresh, "google-refresh");
+});
+
+test("Antigravity agy browser sessions refresh captured and legacy credentials through agy", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-antigravity-agy-session-"));
+  const tokenPath = join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://antigravity/agy-browser-account";
+  await secretStore.write(credentialRef, {
+    type: "official_session",
+    providerId: "antigravity",
+    access: "agy-expired-access",
+    refresh: "agy-refresh",
+    expiresAt: null,
+  });
+  let refreshCalls = 0;
+  let quotaCredential = null;
+  const driver = createAntigravityDriver({
+    cliPath: "agy",
+    env: { HOME: home, DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath },
+    commandRunner: async (_command, args, options) => {
+      refreshCalls += 1;
+      assert.deepEqual(args, ["models"]);
+      assert.equal(options.env.AGY_CLI_HIDE_ACCOUNT_INFO, "1");
+      assert.equal(options.env.HOME, home);
+      assert.equal(options.env.GEMINI_FORCE_FILE_STORAGE, "true");
+      await mkdir(dirname(options.env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE), { recursive: true });
+      await writeFile(options.env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE, JSON.stringify({
+        auth_method: "consumer",
+        token: {
+          access_token: "agy-refreshed-access",
+          refresh_token: "agy-refreshed-refresh",
+          expiry: "2026-08-25T13:00:00.000Z",
+        },
+      }));
+      return { output: "", errorOutput: "" };
+    },
+    tokenResolver: () => null,
+    quotaReader: async ({ credential }) => {
+      quotaCredential = credential;
+      return {
+        quotaGroups: [{
+          name: "Captured agy group",
+          buckets: [{ id: "daily", name: "Daily", remainingFraction: 0.72, resetTime: 1_900_000_000_000 }],
+        }],
+      };
+    },
+    fetchImpl: async () => {
+      refreshCalls += 1;
+      throw new Error("DSH Google refresh must not run for agy sessions");
+    },
+  });
+  const account = {
+    providerId: "antigravity",
+    accountId: "antigravity:session:agy-browser-account",
+    credentialRef,
+    auth: { kind: "official_session", credentialRef, scopes: [] },
+    resources: {
+      sessionSource: "browser",
+      // This intentionally omits credentialRefreshMode to cover accounts
+      // imported before the mode was persisted in the account snapshot.
+      sessionPersistence: "captured",
+    },
+    refresh: { accessTokenExpiresAt: null, refreshable: true },
+  };
+
+  const refreshed = await driver.refreshAccount(account, {
+    secretStore,
+    now: new Date("2026-08-25T12:00:00.000Z"),
+  });
+  assert.equal(refreshCalls, 1);
+  assert.equal(quotaCredential.access, "agy-refreshed-access");
+  assert.equal(quotaCredential.refresh, "agy-refreshed-refresh");
+  assert.equal(refreshed.quota.remaining, 0.72);
+  assert.equal(refreshed.refresh.accessTokenExpiresAt, "2026-08-25T13:00:00.000Z");
+  assert.equal(refreshed.refresh.refreshable, true);
+  assert.equal((await secretStore.read(credentialRef)).access, "agy-refreshed-access");
+  assert.equal((await secretStore.read(credentialRef)).refresh, "agy-refreshed-refresh");
+  await rm(home, { recursive: true, force: true });
+});
+
+test("Antigravity local agy sessions refresh the canonical token before native quota", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-antigravity-active-session-"));
+  const tokenPath = join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://antigravity/active-session";
+  await mkdir(dirname(tokenPath), { recursive: true });
+  await writeFile(tokenPath, JSON.stringify({
+    auth_method: "consumer",
+    token: {
+      access_token: "active-expired-access",
+      refresh_token: "active-refresh",
+      expiry: "2026-08-25T13:00:00.000Z",
+    },
+  }));
+  let refreshCalls = 0;
+  let quotaCredential = null;
+  const driver = createAntigravityDriver({
+    cliPath: "agy",
+    env: { HOME: home, DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath },
+    usePtyForSessionRefresh: false,
+    commandRunner: async (_command, args, options) => {
+      refreshCalls += 1;
+      assert.deepEqual(args, ["models"]);
+      assert.equal(options.env.AGY_CLI_HIDE_ACCOUNT_INFO, "1");
+      assert.equal(options.env.HOME, home);
+      assert.equal(options.env.GEMINI_FORCE_FILE_STORAGE, "true");
+      await writeFile(options.env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE, JSON.stringify({
+        auth_method: "consumer",
+        token: {
+          access_token: "active-refreshed-access",
+          refresh_token: "active-refreshed-refresh",
+          expiry: "2026-08-25T14:00:00.000Z",
+        },
+      }));
+      return { output: "", errorOutput: "" };
+    },
+    quotaReader: async ({ credential }) => {
+      quotaCredential = credential;
+      return {
+        quotaGroups: [{
+          name: "Active agy group",
+          buckets: [{ id: "daily", name: "Daily", remainingFraction: 0.81, resetTime: 1_900_000_000_000 }],
+        }],
+      };
+    },
+  });
+  const account = {
+    providerId: "antigravity",
+    accountId: "antigravity:active",
+    auth: { kind: "official_session", credentialRef, scopes: [] },
+    resources: { sessionSource: "cli" },
+    refresh: { accessTokenExpiresAt: "2026-08-25T13:00:00.000Z", refreshable: true },
+  };
+
+  const refreshed = await driver.refreshAccount(account, {
+    secretStore,
+    now: new Date("2026-08-25T13:30:00.000Z"),
+  });
+  assert.equal(refreshCalls, 1);
+  assert.equal(quotaCredential.access, "active-refreshed-access");
+  assert.equal(quotaCredential.refresh, "active-refreshed-refresh");
+  assert.equal(refreshed.quota.remaining, 0.81);
+  assert.equal(refreshed.refresh.accessTokenExpiresAt, "2026-08-25T14:00:00.000Z");
+  assert.equal((await secretStore.read(credentialRef)).access, "active-refreshed-access");
+  await rm(home, { recursive: true, force: true });
 });
 
 test("Antigravity native quota reader uses the first-party summary endpoint", async () => {
@@ -1194,6 +1542,37 @@ test("Grok catalog loader caches a local provider response", async () => {
   assert.deepEqual(first.models, [{ id: "grok-live", name: "grok-live" }]);
   assert.strictEqual(first, second);
   assert.equal(reads, 1);
+  const forced = await loader({ force: true });
+  assert.equal(reads, 2);
+  assert.deepEqual(forced.models, [{ id: "grok-live", name: "grok-live" }]);
+});
+
+test("Grok catalog loader force refresh does not join an in-flight request", async () => {
+  let calls = 0;
+  let releaseFirst;
+  let enteredFirst;
+  const firstStarted = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => {
+      const call = ++calls;
+      if (call === 1) {
+        enteredFirst();
+        await firstStarted;
+      }
+      return { models: { [`grok-${call}`]: { info: { model: `grok-${call}` } } } };
+    },
+    cacheTtlMs: 60_000,
+  });
+  const firstPromise = loader();
+  await firstEntered;
+  const forced = await loader({ force: true });
+  releaseFirst();
+  const first = await firstPromise;
+  assert.equal(calls, 2);
+  assert.deepEqual(forced.models, [{ id: "grok-2", name: "grok-2" }]);
+  assert.deepEqual(first.models, [{ id: "grok-1", name: "grok-1" }]);
 });
 
 test("Grok catalog loader returns persisted models before a slow CLI refresh", async () => {
@@ -1359,6 +1738,57 @@ test("browser OAuth invocations refresh Claude and Cursor access tokens", async 
   assert.equal(cursorResult, "cursor-response");
   assert.equal(cursorRefreshCalls, 1);
   assert.equal((await secretStore.read(cursorRef)).refresh, "cursor-new-refresh");
+});
+
+test("Claude CLI OAuth credentials are captured and refreshed from the persisted session", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-claude-oauth-file-"));
+  const secretStore = new MemorySecretStore();
+  try {
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(join(home, ".claude", ".credentials.json"), JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "claude-file-old-access",
+        refreshToken: "claude-file-refresh",
+        expiresAt: "2020-01-01T00:00:00.000Z",
+      },
+    }));
+    let refreshCalls = 0;
+    const driver = createClaudeDriver({
+      home,
+      cliPath: "missing-claude",
+      commandRunner: async () => ({
+        output: JSON.stringify({
+          loggedIn: true,
+          authMethod: "oauth",
+          apiProvider: "firstParty",
+          accountId: "claude-file-account",
+          email: "claude-file@example.test",
+        }),
+      }),
+      fetchImpl: async () => {
+        refreshCalls += 1;
+        return response(200, {
+          access_token: "claude-file-new-access",
+          refresh_token: "claude-file-new-refresh",
+          expires_in: 3600,
+        });
+      },
+      requestExecutor: async () => "claude-file-response",
+    });
+    const active = await driver.getActiveSession({ secretStore });
+    const account = active.accounts[0];
+    assert.equal(account.refresh.refreshable, true);
+    assert.equal((await secretStore.read(account.credentialRef)).refresh, "claude-file-refresh");
+    const result = await driver.invoke({}, { account }, {
+      secretStore,
+      now: new Date("2026-08-24T12:00:00.000Z"),
+    });
+    assert.equal(result, "claude-file-response");
+    assert.equal(refreshCalls, 1);
+    assert.equal((await secretStore.read(account.credentialRef)).access, "claude-file-new-access");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("official desktop session readers can replace CLI detection and login", async () => {
@@ -1546,6 +1976,7 @@ test("browser OAuth adapters exchange and import provider credentials", async ()
   assert.equal(antigravityResult.status, "completed");
   assert.equal(antigravityResult.accounts[0].email, "google@example.test");
   assert.equal(antigravityResult.accounts[0].resources.sessionSource, "browser");
+  assert.equal(antigravityResult.accounts[0].resources.credentialRefreshMode, "dockyard_browser_oauth");
   const antigravityCredential = await secretStore.read(antigravityResult.accounts[0].credentialRef);
   assert.equal(antigravityCredential.access, "google-access");
   assert.equal(antigravityCredential.refresh, "google-refresh");
@@ -1610,6 +2041,12 @@ test("Claude official CLI executor preserves streaming output and selected model
   assert.ok(calls[0].args.includes("--effort") && calls[0].args.includes("high"));
   assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Hel", "lo"]);
   assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, { inputTokens: 2, outputTokens: 3 });
+});
+
+test("CLI event parsing only exposes assistant content", () => {
+  assert.deepEqual(cliEventText({ type: "message", role: "user", content: "secret input" }), []);
+  assert.deepEqual(cliEventText({ type: "assistant", role: "assistant", content: "answer" }), ["answer"]);
+  assert.deepEqual(cliEventText({ type: "tool_result", content: "tool output" }), []);
 });
 
 test("text-only subscription CLIs reject images instead of dropping them", async () => {
@@ -1722,6 +2159,38 @@ test("Cursor status/catalog are sourced from the official CLI response", async (
     contextWindow: 128_000,
     maxTokens: 16_000,
   }]);
+});
+
+test("Cursor catalog loader force refresh does not join an in-flight request", async () => {
+  let calls = 0;
+  let releaseFirst;
+  let enteredFirst;
+  const firstStarted = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      const call = ++calls;
+      if (call === 1) {
+        enteredFirst();
+        await firstStarted;
+      }
+      return {
+        output: JSON.stringify({
+          loggedIn: true,
+          models: [{ id: `cursor-${call}`, name: `Cursor ${call}` }],
+        }),
+        errorOutput: "",
+      };
+    },
+  });
+  const firstPromise = loader();
+  await firstEntered;
+  const forced = await loader({ force: true });
+  releaseFirst();
+  const first = await firstPromise;
+  assert.equal(calls, 2);
+  assert.equal(forced.models[0].id, "cursor-2");
+  assert.equal(first.models[0].id, "cursor-1");
 });
 
 test("Cursor Connect trailers expose upstream quota errors instead of an empty success", () => {
@@ -1969,6 +2438,55 @@ test("Grok OAuth account execution uses an isolated official CLI profile", async
     await rm(home, { recursive: true, force: true });
     if (profileDir) await rm(profileDir, { recursive: true, force: true });
   }
+});
+
+test("Grok native invocation refreshes an expired OAuth credential before sending", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/native-refresh";
+  await secretStore.write(credentialRef, {
+    type: "oauth",
+    access: "grok-old-access",
+    refresh: "grok-old-refresh",
+    expiresAt: "2020-01-01T00:00:00.000Z",
+    accountId: "grok-native-account",
+  });
+  let refreshRequest = null;
+  let sentCredential = null;
+  const executor = async ({ credential }) => {
+    sentCredential = credential;
+    return "grok-response";
+  };
+  executor.nativeTransport = "xai-chat-completions";
+  const driver = createGrokDriver({
+    tokenUrl: "https://auth.x.ai/oauth2/token",
+    requestExecutor: executor,
+    fetchImpl: async (url, init) => {
+      refreshRequest = { url, init };
+      return response(200, {
+        access_token: "grok-new-access",
+        refresh_token: "grok-new-refresh",
+        expires_in: 3600,
+      });
+    },
+  });
+  const result = await driver.invoke({}, {
+    account: {
+      providerId: "grok",
+      accountId: "grok-native-account",
+      credentialRef,
+      auth: { credentialRef },
+      refresh: { accessTokenExpiresAt: "2020-01-01T00:00:00.000Z", refreshable: true },
+    },
+  }, {
+    secretStore,
+    now: new Date("2026-08-24T12:00:00.000Z"),
+  });
+  assert.equal(result, "grok-response");
+  assert.equal(refreshRequest.url, "https://auth.x.ai/oauth2/token");
+  assert.equal(refreshRequest.init.method, "POST");
+  assert.match(String(refreshRequest.init.body), /grant_type=refresh_token/);
+  assert.equal(sentCredential.access, "grok-new-access");
+  assert.equal((await secretStore.read(credentialRef)).refresh, "grok-new-refresh");
 });
 
 test("Grok official CLI executor keeps streaming-json and live model selection", async () => {

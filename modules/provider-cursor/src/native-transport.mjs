@@ -10,6 +10,7 @@ import {
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
 import {
+  cursorGrpcStatusFlags,
   cursorNativeProtocolConstants,
   decodeCursorTruncateFlag,
   cursorTurnComplete,
@@ -19,6 +20,7 @@ import {
   decodeCursorConnectTrailer,
   decodeCursorKvRequest,
   decodeCursorText,
+  decodeCursorToolMessage,
   encodeAgentRunRequest,
   encodeHeartbeat,
   encodeKvResponse,
@@ -26,6 +28,13 @@ import {
 
 const PROVIDER_ID = "cursor";
 const DEFAULT_ENDPOINT = cursorNativeProtocolConstants.endpoint;
+const DEFAULT_TOTAL_TIMEOUT_MS = 120_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+// Pin the advertised client version to a fixed, reviewable official
+// cursor-agent build id instead of deriving it from today's date: two builds
+// of DSH must send identical versions, and a bump must be a deliberate change
+// tracking an official CLI release. DOCKYARD_CURSOR_CLIENT_VERSION overrides.
+const DEFAULT_CURSOR_CLIENT_VERSION = "cli-2025.09.17-agent-host";
 const CURSOR_SESSION_KEYS = [
   "cursorAuth/accessToken",
   "cursorAuth/refreshToken",
@@ -130,7 +139,7 @@ function cursorHeaders(endpoint, token, requestId, env) {
   // 能工作的开源实现（opencode-cursor）用真实 CLI 版本号，而不是
   // `cli-${today}-agent-host` 这种服务端不认识的假版本。假版本会被
   // AgentService 降级成只推 heartbeat、不吐 text_delta。
-  const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION ?? "cli-2026.01.09-231024f";
+  const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION ?? DEFAULT_CURSOR_CLIENT_VERSION;
   const clientKey = createHash("sha256").update(`cursor-client-key:${token}`).digest("hex");
   return {
     ":method": "POST",
@@ -161,7 +170,15 @@ function cursorStatusError(status) {
   return nativeProviderError(PROVIDER_ID, `Cursor AgentService returned HTTP ${status}`, { status });
 }
 
-function streamCursor({ endpoint, token, request, context, http2Module = http2 }) {
+function streamCursor({
+  endpoint,
+  token,
+  request,
+  context,
+  http2Module = http2,
+  timeoutMs = DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+}) {
   return (async function* cursorStream() {
     const requestId = firstString(request.requestId, context.requestId, randomUUID());
     const conversationId = firstString(request.sessionId, context.sessionId, requestId);
@@ -208,10 +225,26 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
     const idleTimeoutMs = Number(process.env.DOCKYARD_CURSOR_IDLE_TIMEOUT_MS ?? 180_000);
     let cleaned = false;
     let heartbeat;
+    let totalTimer;
+    let idleTimer;
+    const timeoutFailure = (message, code) => {
+      const error = nativeProviderError(PROVIDER_ID, message, { code });
+      error.code = code;
+      queue.fail(error);
+      stream?.close(http2Module.constants?.NGHTTP2_CANCEL);
+      session.close();
+    };
+    const armIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => timeoutFailure("Cursor AgentService response idle timeout", "ETIMEDOUT"), idleTimeoutMs);
+      idleTimer.unref?.();
+    };
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       clearInterval(heartbeat);
+      clearTimeout(totalTimer);
+      clearTimeout(idleTimer);
       context.signal?.removeEventListener?.("abort", onAbort);
       if (stream && !stream.destroyed && !stream.closed) stream.close();
       if (!session.closed && !session.destroyed) session.close();
@@ -230,16 +263,23 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
       wrapped.cause = error;
       return wrapped;
     };
+    totalTimer = setTimeout(() => timeoutFailure("Cursor AgentService total request timeout", "ETIMEDOUT"), timeoutMs);
+    totalTimer.unref?.();
+    armIdleTimer();
+    context.signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (context.signal?.aborted) onAbort();
     session.once("error", (error) => { cursorDebug(`${sid} SESSION-ERROR ${error.message} code=${error.code ?? ""}`); queue.fail(wrapTransportError(error)); });
     try {
       stream = session.request(cursorHeaders(url, token, requestId, context.env ?? process.env));
       stream.once("response", (headers) => {
+        armIdleTimer();
         responseStatus = Number(headers[":status"] ?? 0);
         lastProgressAt = Date.now();
         cursorDebug(`${sid} STATUS ${responseStatus} ct=${headers["content-type"] ?? "?"}`);
         if (responseStatus >= 400) queue.fail(cursorStatusError(responseStatus));
       });
       stream.on("data", (chunk) => {
+        armIdleTimer();
         const incoming = new Uint8Array(chunk);
         const merged = new Uint8Array(responseBuffer.byteLength + incoming.byteLength);
         merged.set(responseBuffer);
@@ -253,10 +293,15 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
             const trailer = decodeCursorConnectTrailer(frame.payload);
             if (trailer) {
               cursorDebug(`${sid} TRAILER-ERROR code=${trailer.code} msg=${trailer.message}`);
-              queue.fail(nativeProviderError(PROVIDER_ID, trailer.message, {
+              const error = nativeProviderError(PROVIDER_ID, trailer.message, {
                 code: trailer.code,
                 body: { code: trailer.code, message: trailer.message },
-              }));
+              });
+              // Binary google.rpc.Status trailers carry the real gRPC code
+              // (UNAUTHENTICATED/PERMISSION_DENIED/RESOURCE_EXHAUSTED…);
+              // project it onto the account-pool markers.
+              Object.assign(error, cursorGrpcStatusFlags(trailer.code));
+              queue.fail(error);
             } else {
               completed = true;
               queue.push({ type: "complete" });
@@ -281,6 +326,20 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
             } catch (error) {
               queue.fail(error);
             }
+            continue;
+          }
+          const toolCall = decodeCursorToolMessage(frame.payload);
+          if (toolCall) {
+            // The server asked the desktop client to execute a native tool.
+            // Failing loudly beats silently dropping the frame and reporting
+            // a fabricated empty success.
+            queue.fail(protocolError(
+              `Cursor AgentService requested an unsupported native tool call`
+                + `${toolCall.toolKind ? ` (${toolCall.toolKind})` : ""}`
+                + `${toolCall.callId ? ` [${toolCall.callId}]` : ""};`
+                + " DSH's Cursor transport does not execute server-side tools",
+              "CURSOR_UNSUPPORTED_TOOL_CALL",
+            ));
             continue;
           }
           const text = decodeCursorText(frame.payload);
@@ -349,8 +408,6 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
         if (!stream || stream.destroyed || stream.closed) return;
         try { stream.write(Buffer.from(encodeHeartbeat())); } catch { /* stream is closing */ }
       }, idleTickMs);
-      context.signal?.addEventListener?.("abort", onAbort, { once: true });
-
       let text = "";
       let failed = false;
       yield { type: "block-start", index: 0, blockType: "text" };
@@ -394,6 +451,8 @@ export function createCursorNativeExecutor({
   home = homedir(),
   tokenResolver = resolveCursorAccessToken,
   http2Module = http2,
+  timeoutMs = Number(process.env.DOCKYARD_CURSOR_TIMEOUT_MS) || DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs = Number(process.env.DOCKYARD_CURSOR_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS,
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
   // 上游偶发截断/断流。重试循环必须在 executor 里真正消费流：
@@ -476,4 +535,7 @@ export function createCursorNativeExecutor({
 export const cursorNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID,
   endpoint: DEFAULT_ENDPOINT,
+  clientVersion: DEFAULT_CURSOR_CLIENT_VERSION,
+  totalTimeoutMs: DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
 });

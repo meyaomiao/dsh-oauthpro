@@ -67,6 +67,7 @@ function deepseekBalanceModule() {
           windows: balances.map((balance) => ({
             id: `balance-${balance.currency ?? "unknown"}`,
             name: "账户余额",
+            kind: "balance",
             remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number"
               ? balance.total_balance
               : null,
@@ -109,6 +110,7 @@ function openRouterCreditsModule() {
           windows: [{
             id: "credits",
             name: "剩余 credits",
+            kind: "balance",
             remaining: total !== null && used !== null ? total - used : null,
             limit: total,
             unit: "USD",
