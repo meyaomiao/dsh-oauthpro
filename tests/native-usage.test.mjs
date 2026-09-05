@@ -134,7 +134,7 @@ test("fully incompatible custom providers report unsupported with per-probe diag
     const module = usageModuleFor("strange", { baseURL: "https://strange.example.dev/v1" });
     const result = await module.fetch({ providerId: "strange", profile: { baseURL: "https://strange.example.dev/v1" }, apiKey: "test-key" });
     assert.equal(result.status, "unsupported");
-    assert.equal(result.diagnostics.length, 2);
+    assert.equal(result.diagnostics.length, 3);
     assert.match(result.diagnostics[0], /404/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -146,4 +146,73 @@ test("custom providers without a baseURL keep the generic unsupported message", 
   assert.notEqual(module.id, "custom-endpoint-probe");
   const result = await module.fetch({ providerId: "no-url" });
   assert.equal(result.status, "unsupported");
+});
+
+test("zai module maps the official quota/limit response into credit windows", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), "https://api.z.ai/api/monitor/usage/quota/limit");
+    return new Response(JSON.stringify({
+      code: 200,
+      msg: "Operation successful",
+      success: true,
+      data: {
+        level: "pro",
+        limits: [
+          { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 12000, currentValue: 2420, remaining: 9579, percentage: 20, nextResetTime: 1788617806643 },
+          { type: "CREDIT_LIMIT", unit: 6, number: 1, usage: 60000, currentValue: 2420, remaining: 57579, percentage: 4, nextResetTime: 1789204454997 },
+        ],
+      },
+    }), { status: 200 });
+  };
+  try {
+    const result = await usageModuleFor("zai").fetch({ providerId: "zai", profile: null, apiKey: "test-key" });
+    assert.equal(result.status, "ok");
+    assert.equal(result.plan, "pro");
+    assert.equal(result.quota.windows.length, 2);
+    assert.equal(result.quota.windows[0].remaining, 9579);
+    assert.equal(result.quota.windows[0].limit, 12000);
+    assert.equal(result.quota.windows[0].unit, "credits");
+    assert.match(result.quota.windows[0].name, /5 小时/);
+    assert.match(result.quota.windows[1].name, /1 个月/);
+    assert.equal(result.quota.windows[1].resetAt, new Date(1789204454997).toISOString());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("zai module rejects unrecognized quota payloads loudly", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ code: 401, msg: "token expired or incorrect", success: false }), { status: 200 });
+  try {
+    await assert.rejects(
+      () => usageModuleFor("zai").fetch({ providerId: "zai", profile: null, apiKey: "bad-key" }),
+      /无法识别/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("custom probe picks up z.ai-compatible gateways via the origin quota endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (calls.length < 3) return new Response("nope", { status: 404 });
+    return new Response(JSON.stringify({
+      code: 200, success: true,
+      data: { level: "glm-coding", limits: [{ type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 1000, remaining: 800, percentage: 20 }] },
+    }), { status: 200 });
+  };
+  try {
+    const module = usageModuleFor("glm-gateway", { baseURL: "https://gw.example.dev/v4" });
+    const result = await module.fetch({ providerId: "glm-gateway", profile: { baseURL: "https://gw.example.dev/v4" }, apiKey: "test-key" });
+    assert.equal(calls[2], "https://gw.example.dev/api/monitor/usage/quota/limit");
+    assert.equal(result.status, "ok");
+    assert.equal(result.details.probedFamily, "zai");
+    assert.equal(result.quota.windows[0].remaining, 800);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

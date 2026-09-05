@@ -12473,6 +12473,56 @@ function bearerHeaders(apiKey) {
 function updatedAt() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
+function zaiQuotaFrom(body) {
+  if (body?.code !== 200 || body?.success !== true || !Array.isArray(body?.data?.limits)) return null;
+  const refreshedAt = updatedAt();
+  const unitLabels = { 1: "\u5929", 3: "\u5C0F\u65F6", 5: "\u5206\u949F", 6: "\u4E2A\u6708" };
+  const windows = body.data.limits.filter((limit) => limit && typeof limit === "object").map((limit) => {
+    const unitLabel = unitLabels[limit.unit] ?? "\u4E2A\u5468\u671F";
+    const isCredit = limit.type === "CREDIT_LIMIT";
+    return {
+      id: `zai-${limit.type ?? "window"}-${limit.number ?? "?"}${unitLabel}`,
+      name: `${limit.number ?? "?"} ${unitLabel}${isCredit ? "\u989D\u5EA6\u7A97\u53E3" : "\u7A97\u53E3"}`,
+      kind: "subscription",
+      remaining: typeof limit.remaining === "number" ? limit.remaining : typeof limit.percentage === "number" ? 100 - limit.percentage : null,
+      usedPercent: typeof limit.percentage === "number" ? limit.percentage : null,
+      limit: typeof limit.usage === "number" ? limit.usage : 100,
+      unit: isCredit ? "credits" : "%",
+      resetAt: Number.isFinite(Number(limit.nextResetTime)) && Number(limit.nextResetTime) > 0 ? new Date(Number(limit.nextResetTime)).toISOString() : null,
+      updatedAt: refreshedAt
+    };
+  });
+  if (windows.length === 0) return null;
+  const plan = body.data.level ?? body.data.planName ?? body.data.plan ?? null;
+  return {
+    status: "ok",
+    source: "z.ai /api/monitor/usage/quota/limit",
+    updatedAt: refreshedAt,
+    available: true,
+    plan,
+    quota: { windows },
+    details: { plan, limits: body.data.limits.length }
+  };
+}
+function zaiQuotaModule() {
+  return {
+    id: "zai-quota",
+    supports: ["zai", "zai-coding-cn", "zhipu", "glm"],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const baseUrl = baseUrlFor(providerId, profile);
+      if (!baseUrl) throw new Error("provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u7684 base URL");
+      const origin = new URL(baseUrl).origin;
+      const body = await readJson2(await fetch(endpoint(origin, "api/monitor/usage/quota/limit"), {
+        method: "GET",
+        headers: bearerHeaders(apiKey),
+        signal
+      }));
+      const mapped = zaiQuotaFrom(body);
+      if (!mapped) throw new Error("z.ai \u4F59\u989D\u63A5\u53E3\u8FD4\u56DE\u4E86\u65E0\u6CD5\u8BC6\u522B\u7684\u54CD\u5E94\u5F62\u72B6");
+      return mapped;
+    }
+  };
+}
 function deepseekBalanceFrom(body) {
   const balances = Array.isArray(body?.balance_infos) ? body.balance_infos : null;
   if (!balances) return null;
@@ -12558,7 +12608,13 @@ function openRouterCreditsModule() {
 function customEndpointProbeModule() {
   const probes = [
     { family: "deepseek", path: "user/balance", map: deepseekBalanceFrom },
-    { family: "openrouter", path: "credits", map: openRouterCreditsFrom }
+    { family: "openrouter", path: "credits", map: openRouterCreditsFrom },
+    {
+      family: "zai",
+      // The z.ai quota endpoint hangs off the host origin, not the API prefix.
+      url: (baseUrl) => endpoint(new URL(baseUrl).origin, "api/monitor/usage/quota/limit"),
+      map: zaiQuotaFrom
+    }
   ];
   return {
     id: "custom-endpoint-probe",
@@ -12571,7 +12627,8 @@ function customEndpointProbeModule() {
       const diagnostics = [];
       for (const probe of probes) {
         try {
-          const response = await fetch(endpoint(baseUrl, probe.path), {
+          const url = probe.url ? probe.url(baseUrl) : endpoint(baseUrl, probe.path);
+          const response = await fetch(url, {
             method: "GET",
             headers: bearerHeaders(apiKey),
             signal
@@ -12585,16 +12642,16 @@ function customEndpointProbeModule() {
               details: { ...mapped.details, probedFamily: probe.family }
             };
           }
-          diagnostics.push(`${probe.path}: \u54CD\u5E94\u4E0D\u662F ${probe.family} \u4F59\u989D\u683C\u5F0F`);
+          diagnostics.push(`${url}: \u54CD\u5E94\u4E0D\u662F ${probe.family} \u4F59\u989D\u683C\u5F0F`);
         } catch (error) {
-          diagnostics.push(`${probe.path}: ${error?.message ?? String(error)}`);
+          diagnostics.push(`${probe.family}: ${error?.message ?? String(error)}`);
         }
       }
       return {
         status: "unsupported",
         source: "provider official API",
         providerId,
-        message: "\u8BE5 provider \u7684 baseURL \u6CA1\u6709\u54CD\u5E94\u5DF2\u77E5\u7684\u4F59\u989D\u63A5\u53E3\uFF08DeepSeek /user/balance\u3001OpenRouter /credits\uFF09\u3002",
+        message: "\u8BE5 provider \u7684 baseURL \u6CA1\u6709\u54CD\u5E94\u5DF2\u77E5\u7684\u4F59\u989D\u63A5\u53E3\uFF08DeepSeek /user/balance\u3001OpenRouter /credits\u3001z.ai /api/monitor/usage/quota/limit\uFF09\u3002",
         diagnostics,
         updatedAt: updatedAt()
       };
@@ -12620,6 +12677,7 @@ function unsupportedModule(providerIds, message, helpUrl = null) {
 var MODULES = [
   deepseekBalanceModule(),
   openRouterCreditsModule(),
+  zaiQuotaModule(),
   unsupportedModule(
     ["opencode", "opencode-go"],
     "OpenCode \u5B98\u65B9\u76EE\u524D\u516C\u5F00\u6A21\u578B\u76EE\u5F55\u548C\u63A7\u5236\u53F0\u7528\u91CF\uFF0C\u6CA1\u6709\u516C\u5F00\u7ED9 API Key \u8C03\u7528\u7684\u5B9E\u65F6\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\u3002",

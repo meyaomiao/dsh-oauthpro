@@ -46,6 +46,66 @@ function updatedAt() {
   return new Date().toISOString();
 }
 
+/** Recognize the z.ai / BigModel coding-plan quota payload; null for other API families. */
+function zaiQuotaFrom(body) {
+  if (body?.code !== 200 || body?.success !== true || !Array.isArray(body?.data?.limits)) return null;
+  const refreshedAt = updatedAt();
+  const unitLabels = { 1: "天", 3: "小时", 5: "分钟", 6: "个月" };
+  const windows = body.data.limits
+    .filter((limit) => limit && typeof limit === "object")
+    .map((limit) => {
+      const unitLabel = unitLabels[limit.unit] ?? "个周期";
+      const isCredit = limit.type === "CREDIT_LIMIT";
+      return {
+        id: `zai-${limit.type ?? "window"}-${limit.number ?? "?"}${unitLabel}`,
+        name: `${limit.number ?? "?"} ${unitLabel}${isCredit ? "额度窗口" : "窗口"}`,
+        kind: "subscription",
+        remaining: typeof limit.remaining === "number"
+          ? limit.remaining
+          : (typeof limit.percentage === "number" ? 100 - limit.percentage : null),
+        usedPercent: typeof limit.percentage === "number" ? limit.percentage : null,
+        limit: typeof limit.usage === "number" ? limit.usage : 100,
+        unit: isCredit ? "credits" : "%",
+        resetAt: Number.isFinite(Number(limit.nextResetTime)) && Number(limit.nextResetTime) > 0
+          ? new Date(Number(limit.nextResetTime)).toISOString()
+          : null,
+        updatedAt: refreshedAt,
+      };
+    });
+  if (windows.length === 0) return null;
+  const plan = body.data.level ?? body.data.planName ?? body.data.plan ?? null;
+  return {
+    status: "ok",
+    source: "z.ai /api/monitor/usage/quota/limit",
+    updatedAt: refreshedAt,
+    available: true,
+    plan,
+    quota: { windows },
+    details: { plan, limits: body.data.limits.length },
+  };
+}
+
+function zaiQuotaModule() {
+  return {
+    id: "zai-quota",
+    supports: ["zai", "zai-coding-cn", "zhipu", "glm"],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const baseUrl = baseUrlFor(providerId, profile);
+      if (!baseUrl) throw new Error("provider 没有返回可用的 base URL");
+      // The quota endpoint hangs off the host origin, not the /v4 API prefix.
+      const origin = new URL(baseUrl).origin;
+      const body = await readJson(await fetch(endpoint(origin, "api/monitor/usage/quota/limit"), {
+        method: "GET",
+        headers: bearerHeaders(apiKey),
+        signal,
+      }));
+      const mapped = zaiQuotaFrom(body);
+      if (!mapped) throw new Error("z.ai 余额接口返回了无法识别的响应形状");
+      return mapped;
+    },
+  };
+}
+
 /** Recognize the official DeepSeek balance payload; null when it is a different API family. */
 function deepseekBalanceFrom(body) {
   const balances = Array.isArray(body?.balance_infos) ? body.balance_infos : null;
@@ -147,6 +207,12 @@ function customEndpointProbeModule() {
   const probes = [
     { family: "deepseek", path: "user/balance", map: deepseekBalanceFrom },
     { family: "openrouter", path: "credits", map: openRouterCreditsFrom },
+    {
+      family: "zai",
+      // The z.ai quota endpoint hangs off the host origin, not the API prefix.
+      url: (baseUrl) => endpoint(new URL(baseUrl).origin, "api/monitor/usage/quota/limit"),
+      map: zaiQuotaFrom,
+    },
   ];
   return {
     id: "custom-endpoint-probe",
@@ -160,7 +226,8 @@ function customEndpointProbeModule() {
       const diagnostics = [];
       for (const probe of probes) {
         try {
-          const response = await fetch(endpoint(baseUrl, probe.path), {
+          const url = probe.url ? probe.url(baseUrl) : endpoint(baseUrl, probe.path);
+          const response = await fetch(url, {
             method: "GET",
             headers: bearerHeaders(apiKey),
             signal,
@@ -174,16 +241,16 @@ function customEndpointProbeModule() {
               details: { ...mapped.details, probedFamily: probe.family },
             };
           }
-          diagnostics.push(`${probe.path}: 响应不是 ${probe.family} 余额格式`);
+          diagnostics.push(`${url}: 响应不是 ${probe.family} 余额格式`);
         } catch (error) {
-          diagnostics.push(`${probe.path}: ${error?.message ?? String(error)}`);
+          diagnostics.push(`${probe.family}: ${error?.message ?? String(error)}`);
         }
       }
       return {
         status: "unsupported",
         source: "provider official API",
         providerId,
-        message: "该 provider 的 baseURL 没有响应已知的余额接口（DeepSeek /user/balance、OpenRouter /credits）。",
+        message: "该 provider 的 baseURL 没有响应已知的余额接口（DeepSeek /user/balance、OpenRouter /credits、z.ai /api/monitor/usage/quota/limit）。",
         diagnostics,
         updatedAt: updatedAt(),
       };
@@ -211,6 +278,7 @@ function unsupportedModule(providerIds, message, helpUrl = null) {
 const MODULES = [
   deepseekBalanceModule(),
   openRouterCreditsModule(),
+  zaiQuotaModule(),
   unsupportedModule(
     ["opencode", "opencode-go"],
     "OpenCode 官方目前公开模型目录和控制台用量，没有公开给 API Key 调用的实时余额/额度接口。",
