@@ -12473,6 +12473,60 @@ function bearerHeaders(apiKey) {
 function updatedAt() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
+function deepseekBalanceFrom(body) {
+  const balances = Array.isArray(body?.balance_infos) ? body.balance_infos : null;
+  if (!balances) return null;
+  const refreshedAt = updatedAt();
+  return {
+    status: "ok",
+    source: "DeepSeek /user/balance",
+    updatedAt: refreshedAt,
+    available: body.is_available === true,
+    quota: {
+      windows: balances.map((balance) => ({
+        id: `balance-${balance.currency ?? "unknown"}`,
+        name: "\u8D26\u6237\u4F59\u989D",
+        kind: "balance",
+        remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number" ? balance.total_balance : null,
+        limit: null,
+        unit: balance.currency ?? null,
+        resetAt: null,
+        updatedAt: refreshedAt
+      }))
+    },
+    details: balances.map((balance) => ({
+      currency: balance.currency ?? null,
+      totalBalance: balance.total_balance ?? null,
+      grantedBalance: balance.granted_balance ?? null,
+      toppedUpBalance: balance.topped_up_balance ?? null
+    }))
+  };
+}
+function openRouterCreditsFrom(body) {
+  const data = body?.data ?? body;
+  if (!data || typeof data !== "object" || typeof data.total_credits !== "number") return null;
+  const total = data.total_credits;
+  const used = typeof data.total_usage === "number" ? data.total_usage : null;
+  const refreshedAt = updatedAt();
+  return {
+    status: "ok",
+    source: "OpenRouter /api/v1/credits",
+    updatedAt: refreshedAt,
+    quota: {
+      windows: [{
+        id: "credits",
+        name: "\u5269\u4F59 credits",
+        kind: "balance",
+        remaining: total !== null && used !== null ? total - used : null,
+        limit: total,
+        unit: "USD",
+        resetAt: null,
+        updatedAt: refreshedAt
+      }]
+    },
+    details: { totalCredits: total, totalUsage: used }
+  };
+}
 function deepseekBalanceModule() {
   return {
     id: "deepseek-balance",
@@ -12483,32 +12537,7 @@ function deepseekBalanceModule() {
         headers: bearerHeaders(apiKey),
         signal
       }));
-      const refreshedAt = updatedAt();
-      const balances = Array.isArray(body.balance_infos) ? body.balance_infos : [];
-      return {
-        status: "ok",
-        source: "DeepSeek /user/balance",
-        updatedAt: refreshedAt,
-        available: body.is_available === true,
-        quota: {
-          windows: balances.map((balance) => ({
-            id: `balance-${balance.currency ?? "unknown"}`,
-            name: "\u8D26\u6237\u4F59\u989D",
-            kind: "balance",
-            remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number" ? balance.total_balance : null,
-            limit: null,
-            unit: balance.currency ?? null,
-            resetAt: null,
-            updatedAt: refreshedAt
-          }))
-        },
-        details: balances.map((balance) => ({
-          currency: balance.currency ?? null,
-          totalBalance: balance.total_balance ?? null,
-          grantedBalance: balance.granted_balance ?? null,
-          toppedUpBalance: balance.topped_up_balance ?? null
-        }))
-      };
+      return deepseekBalanceFrom(body);
     }
   };
 }
@@ -12522,27 +12551,52 @@ function openRouterCreditsModule() {
         headers: bearerHeaders(apiKey),
         signal
       }));
-      const data = body.data ?? body;
-      const total = typeof data.total_credits === "number" ? data.total_credits : null;
-      const used = typeof data.total_usage === "number" ? data.total_usage : null;
-      const refreshedAt = updatedAt();
+      return openRouterCreditsFrom(body);
+    }
+  };
+}
+function customEndpointProbeModule() {
+  const probes = [
+    { family: "deepseek", path: "user/balance", map: deepseekBalanceFrom },
+    { family: "openrouter", path: "credits", map: openRouterCreditsFrom }
+  ];
+  return {
+    id: "custom-endpoint-probe",
+    supports: [],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const baseUrl = baseUrlFor(providerId, profile);
+      if (!baseUrl) {
+        return unsupportedModule([providerId], "\u8BE5 provider \u6CA1\u6709\u914D\u7F6E baseURL\uFF0C\u65E0\u6CD5\u63A2\u6D4B\u4F59\u989D\u63A5\u53E3\u3002", null).fetch({ providerId });
+      }
+      const diagnostics = [];
+      for (const probe of probes) {
+        try {
+          const response = await fetch(endpoint(baseUrl, probe.path), {
+            method: "GET",
+            headers: bearerHeaders(apiKey),
+            signal
+          });
+          const body = await readJson2(response);
+          const mapped = probe.map(body);
+          if (mapped) {
+            return {
+              ...mapped,
+              source: `${mapped.source} (probe)`,
+              details: { ...mapped.details, probedFamily: probe.family }
+            };
+          }
+          diagnostics.push(`${probe.path}: \u54CD\u5E94\u4E0D\u662F ${probe.family} \u4F59\u989D\u683C\u5F0F`);
+        } catch (error) {
+          diagnostics.push(`${probe.path}: ${error?.message ?? String(error)}`);
+        }
+      }
       return {
-        status: "ok",
-        source: "OpenRouter /api/v1/credits",
-        updatedAt: refreshedAt,
-        quota: {
-          windows: [{
-            id: "credits",
-            name: "\u5269\u4F59 credits",
-            kind: "balance",
-            remaining: total !== null && used !== null ? total - used : null,
-            limit: total,
-            unit: "USD",
-            resetAt: null,
-            updatedAt: refreshedAt
-          }]
-        },
-        details: { totalCredits: total, totalUsage: used }
+        status: "unsupported",
+        source: "provider official API",
+        providerId,
+        message: "\u8BE5 provider \u7684 baseURL \u6CA1\u6709\u54CD\u5E94\u5DF2\u77E5\u7684\u4F59\u989D\u63A5\u53E3\uFF08DeepSeek /user/balance\u3001OpenRouter /credits\uFF09\u3002",
+        diagnostics,
+        updatedAt: updatedAt()
       };
     }
   };
@@ -12577,8 +12631,14 @@ for (const module of MODULES) {
   for (const providerId of module.supports) modulesByProvider.set(providerId, module);
 }
 var genericUnsupported = unsupportedModule([], "\u8BE5 provider \u5F53\u524D\u6CA1\u6709\u53EF\u9A8C\u8BC1\u7684\u5B98\u65B9\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\uFF1B\u4E0D\u4F1A\u7528\u8BF7\u6C42\u6B21\u6570\u6216\u56FA\u5B9A\u767E\u5206\u6BD4\u66FF\u4EE3\u3002", null);
-function usageModuleFor(providerId) {
-  return modulesByProvider.get(providerId) ?? genericUnsupported;
+var customProbe = customEndpointProbeModule();
+function usageModuleFor(providerId, profile = null) {
+  const known = modulesByProvider.get(providerId);
+  if (known) return known;
+  if (profile && typeof profile === "object" && typeof profile.baseURL === "string" && profile.baseURL.trim()) {
+    return customProbe;
+  }
+  return genericUnsupported;
 }
 
 // packages/dsh-plugin/src/token-usage-ledger.mjs
@@ -13484,7 +13544,7 @@ var NativeKeyPoolHost = class {
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const module = usageModuleFor(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
     const nextRows = [];
     for (const row of rows) {
       let usage;

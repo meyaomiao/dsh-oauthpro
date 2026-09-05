@@ -46,6 +46,66 @@ function updatedAt() {
   return new Date().toISOString();
 }
 
+/** Recognize the official DeepSeek balance payload; null when it is a different API family. */
+function deepseekBalanceFrom(body) {
+  const balances = Array.isArray(body?.balance_infos) ? body.balance_infos : null;
+  if (!balances) return null;
+  const refreshedAt = updatedAt();
+  return {
+    status: "ok",
+    source: "DeepSeek /user/balance",
+    updatedAt: refreshedAt,
+    available: body.is_available === true,
+    quota: {
+      windows: balances.map((balance) => ({
+        id: `balance-${balance.currency ?? "unknown"}`,
+        name: "账户余额",
+        kind: "balance",
+        remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number"
+          ? balance.total_balance
+          : null,
+        limit: null,
+        unit: balance.currency ?? null,
+        resetAt: null,
+        updatedAt: refreshedAt,
+      })),
+    },
+    details: balances.map((balance) => ({
+      currency: balance.currency ?? null,
+      totalBalance: balance.total_balance ?? null,
+      grantedBalance: balance.granted_balance ?? null,
+      toppedUpBalance: balance.topped_up_balance ?? null,
+    })),
+  };
+}
+
+/** Recognize the official OpenRouter credits payload; null when it is a different API family. */
+function openRouterCreditsFrom(body) {
+  const data = body?.data ?? body;
+  if (!data || typeof data !== "object" || typeof data.total_credits !== "number") return null;
+  const total = data.total_credits;
+  const used = typeof data.total_usage === "number" ? data.total_usage : null;
+  const refreshedAt = updatedAt();
+  return {
+    status: "ok",
+    source: "OpenRouter /api/v1/credits",
+    updatedAt: refreshedAt,
+    quota: {
+      windows: [{
+        id: "credits",
+        name: "剩余 credits",
+        kind: "balance",
+        remaining: total !== null && used !== null ? total - used : null,
+        limit: total,
+        unit: "USD",
+        resetAt: null,
+        updatedAt: refreshedAt,
+      }],
+    },
+    details: { totalCredits: total, totalUsage: used },
+  };
+}
+
 function deepseekBalanceModule() {
   return {
     id: "deepseek-balance",
@@ -56,34 +116,7 @@ function deepseekBalanceModule() {
         headers: bearerHeaders(apiKey),
         signal,
       }));
-      const refreshedAt = updatedAt();
-      const balances = Array.isArray(body.balance_infos) ? body.balance_infos : [];
-      return {
-        status: "ok",
-        source: "DeepSeek /user/balance",
-        updatedAt: refreshedAt,
-        available: body.is_available === true,
-        quota: {
-          windows: balances.map((balance) => ({
-            id: `balance-${balance.currency ?? "unknown"}`,
-            name: "账户余额",
-            kind: "balance",
-            remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number"
-              ? balance.total_balance
-              : null,
-            limit: null,
-            unit: balance.currency ?? null,
-            resetAt: null,
-            updatedAt: refreshedAt,
-          })),
-        },
-        details: balances.map((balance) => ({
-          currency: balance.currency ?? null,
-          totalBalance: balance.total_balance ?? null,
-          grantedBalance: balance.granted_balance ?? null,
-          toppedUpBalance: balance.topped_up_balance ?? null,
-        })),
-      };
+      return deepseekBalanceFrom(body);
     },
   };
 }
@@ -98,27 +131,61 @@ function openRouterCreditsModule() {
         headers: bearerHeaders(apiKey),
         signal,
       }));
-      const data = body.data ?? body;
-      const total = typeof data.total_credits === "number" ? data.total_credits : null;
-      const used = typeof data.total_usage === "number" ? data.total_usage : null;
-      const refreshedAt = updatedAt();
+      return openRouterCreditsFrom(body);
+    },
+  };
+}
+
+/**
+ * Custom providers configured in DSH settings (llm-pi-ai.providers) often point
+ * at gateways that speak a known protocol family (DeepSeek-compatible
+ * aggregators, OpenRouter-compatible proxies) under a custom provider id.
+ * Probe the known balance endpoints against the configured baseURL and surface
+ * real diagnostics instead of a blanket "unsupported".
+ */
+function customEndpointProbeModule() {
+  const probes = [
+    { family: "deepseek", path: "user/balance", map: deepseekBalanceFrom },
+    { family: "openrouter", path: "credits", map: openRouterCreditsFrom },
+  ];
+  return {
+    id: "custom-endpoint-probe",
+    supports: [],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const baseUrl = baseUrlFor(providerId, profile);
+      if (!baseUrl) {
+        return unsupportedModule([providerId], "该 provider 没有配置 baseURL，无法探测余额接口。", null)
+          .fetch({ providerId });
+      }
+      const diagnostics = [];
+      for (const probe of probes) {
+        try {
+          const response = await fetch(endpoint(baseUrl, probe.path), {
+            method: "GET",
+            headers: bearerHeaders(apiKey),
+            signal,
+          });
+          const body = await readJson(response);
+          const mapped = probe.map(body);
+          if (mapped) {
+            return {
+              ...mapped,
+              source: `${mapped.source} (probe)`,
+              details: { ...mapped.details, probedFamily: probe.family },
+            };
+          }
+          diagnostics.push(`${probe.path}: 响应不是 ${probe.family} 余额格式`);
+        } catch (error) {
+          diagnostics.push(`${probe.path}: ${error?.message ?? String(error)}`);
+        }
+      }
       return {
-        status: "ok",
-        source: "OpenRouter /api/v1/credits",
-        updatedAt: refreshedAt,
-        quota: {
-          windows: [{
-            id: "credits",
-            name: "剩余 credits",
-            kind: "balance",
-            remaining: total !== null && used !== null ? total - used : null,
-            limit: total,
-            unit: "USD",
-            resetAt: null,
-            updatedAt: refreshedAt,
-          }],
-        },
-        details: { totalCredits: total, totalUsage: used },
+        status: "unsupported",
+        source: "provider official API",
+        providerId,
+        message: "该 provider 的 baseURL 没有响应已知的余额接口（DeepSeek /user/balance、OpenRouter /credits）。",
+        diagnostics,
+        updatedAt: updatedAt(),
       };
     },
   };
@@ -158,8 +225,17 @@ for (const module of MODULES) {
 
 const genericUnsupported = unsupportedModule([], "该 provider 当前没有可验证的官方余额/额度接口；不会用请求次数或固定百分比替代。", null);
 
-export function usageModuleFor(providerId) {
-  return modulesByProvider.get(providerId) ?? genericUnsupported;
+const customProbe = customEndpointProbeModule();
+
+export function usageModuleFor(providerId, profile = null) {
+  const known = modulesByProvider.get(providerId);
+  if (known) return known;
+  // Custom DSH-settings providers with a configured baseURL get a real probe
+  // of the known protocol families instead of a blanket "unsupported".
+  if (profile && typeof profile === "object" && typeof profile.baseURL === "string" && profile.baseURL.trim()) {
+    return customProbe;
+  }
+  return genericUnsupported;
 }
 
 export function usageModuleIds() {

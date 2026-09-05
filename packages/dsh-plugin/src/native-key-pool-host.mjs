@@ -768,7 +768,7 @@ export class NativeKeyPoolHost {
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const module = usageModuleFor(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
     const nextRows = [];
     for (const row of rows) {
       let usage;
