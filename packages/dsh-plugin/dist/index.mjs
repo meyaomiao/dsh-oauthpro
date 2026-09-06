@@ -1735,7 +1735,7 @@ var UnavailableSecretStore = class {
     return null;
   }
   async write() {
-    throw new Error(`Secure credential storage is unavailable on ${this.platform}; configure the host credential service`);
+    throw new Error(`\u5F53\u524D\u5E73\u53F0\uFF08${this.platform}\uFF09\u6CA1\u6709\u7CFB\u7EDF\u7EA7\u51ED\u8BC1\u5B58\u50A8\uFF1B\u63D2\u4EF6\u5DF2\u6539\u7528 DSH Credentials\uFF08~/.dsh/.credentials.yaml\uFF09\u4FDD\u5B58\u51ED\u8BC1\uFF0C\u6B64\u515C\u5E95\u8DEF\u5F84\u65E0\u9700\u542F\u7528 / No system keychain on ${this.platform}; credentials are persisted through the DSH credential service instead, so this fallback path is not needed`);
   }
   async delete() {
   }
@@ -11898,10 +11898,16 @@ function commandSuccess(text4) {
 function commandError(text4) {
   return { kind: "error", text: text4 };
 }
-function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+function browserOpenCommand(platform = process.platform) {
+  if (platform === "darwin") return { command: "open", args: [] };
+  if (platform === "win32") return { command: "cmd", args: ["/c", "start", ""] };
+  return { command: "xdg-open", args: [] };
+}
+function openDefaultBrowser(url, platform = process.platform) {
+  if (!url) return;
+  const { command, args } = browserOpenCommand(platform);
   try {
-    const child = spawn6("open", [url], { detached: true, stdio: "ignore" });
+    const child = spawn6(command, [...args, url], { detached: true, stdio: "ignore" });
     child.unref();
   } catch {
   }

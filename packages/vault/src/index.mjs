@@ -95,7 +95,7 @@ export class UnavailableSecretStore {
   }
 
   async write() {
-    throw new Error(`Secure credential storage is unavailable on ${this.platform}; configure the host credential service`);
+    throw new Error(`当前平台（${this.platform}）没有系统级凭证存储；插件已改用 DSH Credentials（~/.dsh/.credentials.yaml）保存凭证，此兜底路径无需启用 / No system keychain on ${this.platform}; credentials are persisted through the DSH credential service instead, so this fallback path is not needed`);
   }
 
   async delete() {}
