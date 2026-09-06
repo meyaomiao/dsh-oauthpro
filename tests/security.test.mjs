@@ -9,6 +9,6 @@ test("non-macOS defaults fail closed instead of keeping provider secrets in memo
   assert.equal(await store.read("keychain://missing"), null);
   await assert.rejects(
     () => store.write("keychain://new", { access: "secret" }),
-    /Secure credential storage is unavailable/,
+    /没有系统级凭证存储|Secure credential storage is unavailable/,
   );
 });

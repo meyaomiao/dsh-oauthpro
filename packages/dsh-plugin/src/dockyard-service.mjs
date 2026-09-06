@@ -106,10 +106,17 @@ function commandError(text) {
   return { kind: "error", text };
 }
 
-function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+export function browserOpenCommand(platform = process.platform) {
+  if (platform === "darwin") return { command: "open", args: [] };
+  if (platform === "win32") return { command: "cmd", args: ["/c", "start", ""] };
+  return { command: "xdg-open", args: [] };
+}
+
+function openDefaultBrowser(url, platform = process.platform) {
+  if (!url) return;
+  const { command, args } = browserOpenCommand(platform);
   try {
-    const child = spawn("open", [url], { detached: true, stdio: "ignore" });
+    const child = spawn(command, [...args, url], { detached: true, stdio: "ignore" });
     child.unref();
   } catch {
     // The authorization URL is still returned in the command result.

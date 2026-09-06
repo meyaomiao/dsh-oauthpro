@@ -44,6 +44,12 @@ macOS 完整功能依赖以下原生能力：
 
 Windows 版本已完成 EXE 构建，待上传到 v0.1.2 Release；上传完成后再进行发布页下载验证。
 
+**DSH 插件（本仓库 dsh-oauth-mac ≥ 0.1.1）的平台支持**：
+
+- macOS：完整体验（Keychain 兜底存储 + 浏览器自动打开）。
+- Windows / Linux：核心功能全部可用——模型目录、OAuth 授权（浏览器自动打开已支持 win32 `cmd /c start` 与 Linux `xdg-open`）、余额/额度探测、Key 池面板；凭证经 DSH Credentials（`~/.dsh/.credentials.yaml`）持久化。
+- Cursor / Antigravity 桌面 App 凭证扫描为 macOS 专属，其他平台自动跳过并回退 env 等替代源。
+
 ### macOS 独立应用与 DMG
 
 如果不想手动安装 Node.js、pnpm 或 DSH，可以直接下载自带完整运行时的 macOS 通用 DMG：
