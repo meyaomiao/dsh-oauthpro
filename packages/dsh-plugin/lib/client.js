@@ -41,7 +41,29 @@ __export(dockyard_client_exports, {
 });
 module.exports = __toCommonJS(dockyard_client_exports);
 var React = __toESM(require("react"), 1);
-var import_dsh_client_store2 = require("@deepseek-ai/dsh-client-store");
+
+// packages/dsh-plugin/src/snapshot-store.mjs
+function loadCreateSnapshotStore() {
+  const ids = [
+    "@deepseek-ai/dsh-client-store",
+    "@deepseek-ai/dsh-client-runtime/client"
+  ];
+  const errors = [];
+  for (const id of ids) {
+    try {
+      const mod = require(id);
+      const fn = mod?.createSnapshotStore ?? mod?.default?.createSnapshotStore;
+      if (typeof fn === "function") return fn;
+      errors.push(`${id}: createSnapshotStore is not a function`);
+    } catch (error51) {
+      errors.push(`${id}: ${error51 instanceof Error ? error51.message : String(error51)}`);
+    }
+  }
+  throw new Error(
+    `[dockyard-dsh] createSnapshotStore unavailable. Tried ${ids.join(" then ")}. ${errors.join("; ")}`
+  );
+}
+var createSnapshotStore = loadCreateSnapshotStore();
 
 // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -15152,7 +15174,7 @@ function translate(t, key, params) {
 }
 
 // packages/dsh-plugin/src/native-key-pool.mjs
-var import_dsh_client_store = require("@deepseek-ai/dsh-client-store");
+var import_client = require("@deepseek-ai/dsh-client-runtime/client");
 var STORAGE_PREFIX = "dockyard-dsh.native-key-pool";
 var NATIVE_KEY_POLICY_LABELS = Object.freeze({
   manual: "\u624B\u52A8\u9009\u62E9 Key",
@@ -15260,7 +15282,7 @@ function keyRows(metadata, credentials, activeRef, t) {
 var NativeKeyPoolController = class {
   constructor(dsh, remote = null, t = null) {
     __publicField(this, "api");
-    __publicField(this, "store", (0, import_dsh_client_store.createSnapshotStore)({
+    __publicField(this, "store", (0, import_client.createSnapshotStore)({
       status: "idle",
       action: null,
       providerId: null,
@@ -16229,7 +16251,7 @@ function healthLabel(status, t) {
 var DockyardClientController = class {
   constructor(remote, t) {
     __publicField(this, "remote");
-    __publicField(this, "store", (0, import_dsh_client_store2.createSnapshotStore)({
+    __publicField(this, "store", createSnapshotStore({
       snapshot: null,
       status: "idle",
       action: null,
