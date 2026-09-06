@@ -203,7 +203,7 @@ export class NativeKeyPoolController {
   }
 
   async load(providerId) {
-    if (!providerId || !this.dsh?.llm?.listProviders || !this.dsh?.settings?.describe) {
+    if (!providerId || !this.dsh?.llm?.listConfigurableProviders || !this.dsh?.settings?.describe) {
       this.setState({
         status: "error",
         action: null,
@@ -238,7 +238,7 @@ export class NativeKeyPoolController {
     });
     try {
       const [providersResponse, settingsResponse] = await Promise.all([
-        this.dsh.llm.listProviders(),
+        this.dsh.llm.listConfigurableProviders(),
         this.dsh.settings.describe(),
       ]);
       const catalogValue = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog"));
