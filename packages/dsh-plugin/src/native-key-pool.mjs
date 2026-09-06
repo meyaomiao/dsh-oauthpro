@@ -241,7 +241,8 @@ export class NativeKeyPoolController {
         this.dsh.llm.listProviders(),
         this.dsh.settings.describe(),
       ]);
-      const providers = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog")).providers ?? [];
+      const catalogValue = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog"));
+      const providers = Array.isArray(catalogValue) ? catalogValue : catalogValue?.providers ?? [];
       const settings = resultValue(settingsResponse, this.operation("native.operation.readProviderConfig", "Read provider configuration"));
       const entry = nativeEntry(providers, providerId);
       const namespace = settings.namespaces?.find((view) => view.ns === entry?.settingsNs) ?? null;
