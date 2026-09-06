@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
+import { createSnapshotStore } from "@deepseek-ai/dsh-client-store";
 
 import { TYPERT_REMOTE } from "./dockyard-typert.remote.mjs";
 import {
@@ -2169,8 +2169,8 @@ export async function apply(ctx) {
       credentials: scope.remote?.credentials ?? ctx.get("remote.credentials"),
     });
     const nativeController = new NativeKeyPoolController(dshSurfaces, remote, t);
-    scope.slots.inject("conversation.input.right", () => scope.slots.register({
-      name: "conversation.input.right",
+    scope.slots.inject("conversation.input.left", () => scope.slots.register({
+      name: "conversation.input.left",
       id: "dockyard-account-control",
       order: 10,
        locale: DOCKYARD_LOCALE_NS,
