@@ -275,7 +275,7 @@ export class NativeKeyPoolController {
       ])];
       let credentials = {};
       if (refs.length > 0 && this.dsh.credentials?.describe) {
-        credentials = resultValue(await this.dsh.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
+        credentials = resultValue(await this.dsh.credentials.describe(refs), this.operation("native.operation.readKeyStatus", "Read Key status")) ?? {};
       }
       const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
@@ -349,11 +349,7 @@ export class NativeKeyPoolController {
       : profile === undefined && current.settingsPath.length > 0
         ? [{ op: "set", path: current.settingsPath, value: { apiKeyEnv: ref } }]
         : [{ op: "set", path, value: ref }];
-    const response = await this.dsh.settings.mutate({
-      ns: current.namespace.ns,
-      ops,
-      expectedRevision: current.namespace.revision,
-    });
+    const response = await this.dsh.settings.mutate(current.namespace.ns, ops, current.namespace.revision);
     resultValue(response, this.operation("native.operation.updateProviderKey", "Update provider Key configuration"));
   }
 
@@ -367,7 +363,7 @@ export class NativeKeyPoolController {
       const current = this.store.getSnapshot();
       if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
       ref = makeKeyRef(providerId);
-      resultValue(await this.dsh.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
+      resultValue(await this.dsh.credentials.set(ref, key), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
       metadata.keys = [...metadata.keys.filter((entry) => entry.ref !== ref), {
@@ -431,7 +427,7 @@ export class NativeKeyPoolController {
         else await this.mutateProfile(providerId, null, { clear: true });
       }
       const writable = key.credential?.writable !== false;
-      if (writable) resultValue(await this.dsh.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
+      if (writable) resultValue(await this.dsh.credentials.unset(ref), this.operation("native.operation.removeApiKey", "Remove API Key"));
       const metadata = readMetadata(providerId);
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
