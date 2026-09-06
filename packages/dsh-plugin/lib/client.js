@@ -19610,7 +19610,7 @@ function keyRows(metadata, credentials, activeRef, t) {
   return rows;
 }
 var NativeKeyPoolController = class {
-  constructor(api, remote = null, t = null) {
+  constructor(dsh, remote = null, t = null) {
     __publicField(this, "api");
     __publicField(this, "store", (0, import_client.createSnapshotStore)({
       status: "idle",
@@ -19633,9 +19633,12 @@ var NativeKeyPoolController = class {
       tokenUpdatedAt: null
     }));
     __publicField(this, "generation", 0);
-    this.api = api;
+    this.dshSource = dsh;
     this.remote = remote;
     this.t = t;
+  }
+  get dsh() {
+    return typeof this.dshSource === "function" ? this.dshSource() : this.dshSource;
   }
   operation(key, fallback) {
     return typeof this.t === "function" ? this.t(key) : fallback;
@@ -19661,7 +19664,15 @@ var NativeKeyPoolController = class {
     });
   }
   async load(providerId) {
-    if (!providerId || !this.api?.llm?.providers || !this.api?.settings?.describe) return null;
+    if (!providerId || !this.dsh?.llm?.listConfigurableProviders || !this.dsh?.settings?.describe) {
+      this.setState({
+        status: "error",
+        action: null,
+        providerId,
+        error: "DSH \u8FDC\u7AEF\u670D\u52A1\uFF08remote.llm / remote.settings\uFF09\u5C1A\u672A\u6302\u8F7D\uFF0C\u65E0\u6CD5\u8BFB\u53D6 provider \u72B6\u6001"
+      });
+      return null;
+    }
     const generation = ++this.generation;
     this.setState({
       status: "loading",
@@ -19685,10 +19696,11 @@ var NativeKeyPoolController = class {
     });
     try {
       const [providersResponse, settingsResponse] = await Promise.all([
-        this.api.llm.providers({}),
-        this.api.settings.describe({})
+        this.dsh.llm.listConfigurableProviders(),
+        this.dsh.settings.describe()
       ]);
-      const providers = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog")).providers ?? [];
+      const catalogValue = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog"));
+      const providers = Array.isArray(catalogValue) ? catalogValue : catalogValue?.providers ?? [];
       const settings = resultValue(settingsResponse, this.operation("native.operation.readProviderConfig", "Read provider configuration"));
       const entry = nativeEntry(providers, providerId);
       const namespace = settings.namespaces?.find((view) => view.ns === entry?.settingsNs) ?? null;
@@ -19720,8 +19732,8 @@ var NativeKeyPoolController = class {
         ...metadata.keys.map((key) => key.ref)
       ])];
       let credentials = {};
-      if (refs.length > 0 && this.api.credentials?.describe) {
-        credentials = resultValue(await this.api.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
+      if (refs.length > 0 && this.dsh.credentials?.describe) {
+        credentials = resultValue(await this.dsh.credentials.describe(refs), this.operation("native.operation.readKeyStatus", "Read Key status")) ?? {};
       }
       const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
@@ -19786,11 +19798,7 @@ var NativeKeyPoolController = class {
     const profile = getPath(current.namespace.value, current.settingsPath);
     const path = [...current.settingsPath, "apiKeyEnv"];
     const ops = clear ? [{ op: "unset", path }] : profile === void 0 && current.settingsPath.length > 0 ? [{ op: "set", path: current.settingsPath, value: { apiKeyEnv: ref } }] : [{ op: "set", path, value: ref }];
-    const response = await this.api.settings.mutate({
-      ns: current.namespace.ns,
-      ops,
-      expectedRevision: current.namespace.revision
-    });
+    const response = await this.dsh.settings.mutate(current.namespace.ns, ops, current.namespace.revision);
     resultValue(response, this.operation("native.operation.updateProviderKey", "Update provider Key configuration"));
   }
   async addKey(providerId, value, label = "") {
@@ -19803,7 +19811,7 @@ var NativeKeyPoolController = class {
       const current = this.store.getSnapshot();
       if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
       ref = makeKeyRef(providerId);
-      resultValue(await this.api.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
+      resultValue(await this.dsh.credentials.set(ref, key), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
       metadata.keys = [...metadata.keys.filter((entry) => entry.ref !== ref), {
@@ -19817,8 +19825,8 @@ var NativeKeyPoolController = class {
       this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error61) {
-      if (ref && typeof this.api?.credentials?.delete === "function") {
-        await this.api.credentials.delete({ ref }).catch(() => {
+      if (ref && typeof this.dsh?.credentials?.delete === "function") {
+        await this.dsh.credentials.delete({ ref }).catch(() => {
         });
       }
       this.setState({ action: null, status: "error", providerId, error: errorMessage(error61, this.t) });
@@ -19862,7 +19870,7 @@ var NativeKeyPoolController = class {
         else await this.mutateProfile(providerId, null, { clear: true });
       }
       const writable = key.credential?.writable !== false;
-      if (writable) resultValue(await this.api.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
+      if (writable) resultValue(await this.dsh.credentials.unset(ref), this.operation("native.operation.removeApiKey", "Remove API Key"));
       const metadata = readMetadata(providerId);
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
@@ -22078,9 +22086,14 @@ async function apply(ctx) {
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
   const remote = ctx.get("remote.dockyard");
   const controller = new DockyardClientController(remote, t);
-  ctx.inject(["slots", "modelDirectories", "connection", "remote.session"], (scope) => {
+  ctx.inject(["slots", "modelDirectories", "connection", "remote.session", "remote.llm", "remote.settings", "remote.credentials"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
+    const dshSurfaces = () => ({
+      llm: scope.remote?.llm ?? ctx.get("remote.llm"),
+      settings: scope.remote?.settings ?? ctx.get("remote.settings"),
+      credentials: scope.remote?.credentials ?? ctx.get("remote.credentials")
+    });
+    const nativeController = new NativeKeyPoolController(dshSurfaces, remote, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({
       name: "conversation.input.right",
       id: "dockyard-account-control",
