@@ -160,19 +160,19 @@ export class NativeKeyPoolController {
   });
   generation = 0;
 
-  constructor(api, remote = null, t = null) {
-    // `api` may be a live DSH api object or a getter. `connection.api` is
-    // attached asynchronously after the connection service exists, so the
-    // controller must resolve it at call time instead of snapshotting it
-    // during apply — a snapshot stays `undefined` forever and every popup
-    // action then stalls in its loading state.
-    this.apiSource = api;
+  constructor(dsh, remote = null, t = null) {
+    // `dsh` is a getter for the typert remote surfaces this controller
+    // needs ({ llm, settings, credentials }). The old `connection.api`
+    // surface does not exist on current DSH clients — connection only
+    // exposes the lifecycle handle — so surfaces resolve lazily per call.
+    // states never clear once a stale value is captured.
+    this.dshSource = dsh;
     this.remote = remote;
     this.t = t;
   }
 
-  get api() {
-    return typeof this.apiSource === "function" ? this.apiSource() : this.apiSource;
+  get dsh() {
+    return typeof this.dshSource === "function" ? this.dshSource() : this.dshSource;
   }
 
   operation(key, fallback) {
@@ -203,7 +203,15 @@ export class NativeKeyPoolController {
   }
 
   async load(providerId) {
-    if (!providerId || !this.api?.llm?.providers || !this.api?.settings?.describe) return null;
+    if (!providerId || !this.dsh?.llm?.listProviders || !this.dsh?.settings?.describe) {
+      this.setState({
+        status: "error",
+        action: null,
+        providerId,
+        error: "DSH 远端服务（remote.llm / remote.settings）尚未挂载，无法读取 provider 状态",
+      });
+      return null;
+    }
     const generation = ++this.generation;
     // A provider switch must not paint the previous provider's credential,
     // quota, or usage while the new DSH settings are being read. Keep only a
@@ -230,8 +238,8 @@ export class NativeKeyPoolController {
     });
     try {
       const [providersResponse, settingsResponse] = await Promise.all([
-        this.api.llm.providers({}),
-        this.api.settings.describe({}),
+        this.dsh.llm.listProviders(),
+        this.dsh.settings.describe(),
       ]);
       const providers = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog")).providers ?? [];
       const settings = resultValue(settingsResponse, this.operation("native.operation.readProviderConfig", "Read provider configuration"));
@@ -265,8 +273,8 @@ export class NativeKeyPoolController {
         ...metadata.keys.map((key) => key.ref),
       ])];
       let credentials = {};
-      if (refs.length > 0 && this.api.credentials?.describe) {
-        credentials = resultValue(await this.api.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
+      if (refs.length > 0 && this.dsh.credentials?.describe) {
+        credentials = resultValue(await this.dsh.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
       }
       const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
@@ -340,7 +348,7 @@ export class NativeKeyPoolController {
       : profile === undefined && current.settingsPath.length > 0
         ? [{ op: "set", path: current.settingsPath, value: { apiKeyEnv: ref } }]
         : [{ op: "set", path, value: ref }];
-    const response = await this.api.settings.mutate({
+    const response = await this.dsh.settings.mutate({
       ns: current.namespace.ns,
       ops,
       expectedRevision: current.namespace.revision,
@@ -358,7 +366,7 @@ export class NativeKeyPoolController {
       const current = this.store.getSnapshot();
       if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
       ref = makeKeyRef(providerId);
-      resultValue(await this.api.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
+      resultValue(await this.dsh.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
       metadata.keys = [...metadata.keys.filter((entry) => entry.ref !== ref), {
@@ -376,8 +384,8 @@ export class NativeKeyPoolController {
       // If a later step failed, remove the orphaned secret so a reported
       // failure never leaves an unindexed credential behind. Refs are unique
       // per call, so deleting can never drop a previously stored Key.
-      if (ref && typeof this.api?.credentials?.delete === "function") {
-        await this.api.credentials.delete({ ref }).catch(() => {});
+      if (ref && typeof this.dsh?.credentials?.delete === "function") {
+        await this.dsh.credentials.delete({ ref }).catch(() => {});
       }
       this.setState({ action: null, status: "error", providerId, error: errorMessage(error, this.t) });
       return null;
@@ -422,7 +430,7 @@ export class NativeKeyPoolController {
         else await this.mutateProfile(providerId, null, { clear: true });
       }
       const writable = key.credential?.writable !== false;
-      if (writable) resultValue(await this.api.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
+      if (writable) resultValue(await this.dsh.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
       const metadata = readMetadata(providerId);
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
