@@ -2161,7 +2161,7 @@ export async function apply(ctx) {
   // would reintroduce the self-dependency deadlock above.
   const remote = ctx.get("remote.dockyard");
   const controller = new DockyardClientController(remote, t);
-  ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
+  ctx.inject(["slots", "modelDirectories", "connection", "remote.session"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
     const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({
