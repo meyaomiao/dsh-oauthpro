@@ -2163,7 +2163,7 @@ export async function apply(ctx) {
   const controller = new DockyardClientController(remote, t);
   ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
+    const nativeController = new NativeKeyPoolController(() => (scope.connection ?? ctx.get("connection"))?.api, remote, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({
       name: "conversation.input.right",
       id: "dockyard-account-control",

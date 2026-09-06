@@ -161,9 +161,18 @@ export class NativeKeyPoolController {
   generation = 0;
 
   constructor(api, remote = null, t = null) {
-    this.api = api;
+    // `api` may be a live DSH api object or a getter. `connection.api` is
+    // attached asynchronously after the connection service exists, so the
+    // controller must resolve it at call time instead of snapshotting it
+    // during apply — a snapshot stays `undefined` forever and every popup
+    // action then stalls in its loading state.
+    this.apiSource = api;
     this.remote = remote;
     this.t = t;
+  }
+
+  get api() {
+    return typeof this.apiSource === "function" ? this.apiSource() : this.apiSource;
   }
 
   operation(key, fallback) {
