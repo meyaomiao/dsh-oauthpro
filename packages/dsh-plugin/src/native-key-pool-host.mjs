@@ -131,6 +131,7 @@ function cleanRecord(raw) {
   return {
     policy: POLICIES.has(raw?.policy) ? raw.policy : "manual",
     keys,
+    lastQuota: raw?.lastQuota && typeof raw.lastQuota === "object" ? raw.lastQuota : undefined,
   };
 }
 
@@ -439,7 +440,7 @@ export class NativeKeyPoolHost {
       })),
       tokenTotals: tokenUsage?.totals ?? null,
       tokenUpdatedAt: tokenUsage?.updatedAt ?? null,
-      quota: null,
+      quota: synced.record.lastQuota?.quota ?? null,
       usage: null,
     };
   }
@@ -788,6 +789,12 @@ export class NativeKeyPoolHost {
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
     const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
+    // Persist the last successful quota so the chip survives page reloads and
+    // restarts (status() never runs a live fetch).
+    if (active?.quota) {
+      synced.record.lastQuota = { quota: active.quota, updatedAt: new Date().toISOString() };
+      await this.saveState();
+    }
     const tokenUsage = this.usageSnapshot(providerId);
     return {
       providerId,
