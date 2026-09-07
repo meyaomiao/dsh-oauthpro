@@ -121,7 +121,7 @@ dsh plugin --profile web add github:meyaomiao/dsh-oauth-mac#<commit-sha>
 
 ```sh
 git clone https://github.com/meyaomiao/dsh-oauth-mac.git
-cd dockyard-dsh
+cd dsh-oauth-mac
 npm install
 npm test                 # 可选：验证环境
 npm run build            # 修改 source 或 bundle 过期时需要
@@ -133,9 +133,9 @@ dsh web
 要隔离测试、不影响默认 DSH home：
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
-DSH_HOME=/tmp/dockyard-dsh-home dsh web
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh plugin --profile web add .
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh web --dump-config
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh web
 ```
 
 仓库已提交 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`；普通用户不需要先运行测试或构建即可使用已发布 commit。
@@ -319,7 +319,7 @@ The current release commit includes the runnable host/client bundles and does no
 
 ```sh
 git clone https://github.com/meyaomiao/dsh-oauth-mac.git
-cd dockyard-dsh
+cd dsh-oauth-mac
 npm install
 npm test                 # optional environment check
 npm run build            # needed after source or bundle changes
@@ -331,9 +331,9 @@ dsh web
 For an isolated test that does not touch the default DSH home:
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
-DSH_HOME=/tmp/dockyard-dsh-home dsh web
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh plugin --profile web add .
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh web --dump-config
+DSH_HOME=/tmp/dsh-oauth-mac-home dsh web
 ```
 
 The repository commits `packages/dsh-plugin/dist/index.mjs` and `packages/dsh-plugin/lib/client.js`, so normal users do not need to run tests or build before using a released commit.
