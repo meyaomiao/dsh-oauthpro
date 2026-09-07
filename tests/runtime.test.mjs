@@ -435,8 +435,16 @@ test("runtime ignores a late refresh result after its timeout aborts", async () 
     const pending = runtime.refreshAccount("test-provider", "account-a");
     await assert.rejects(pending, /超时|timed out/i);
     release?.();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.notEqual(runtime.snapshot().providers[0].accounts[0].refresh.accessTokenExpiresAt, "late");
+    // The timeout may fire while init is still materializing the provider
+    // list; wait for it to settle instead of racing a fixed sleep.
+    let lateAccount = null;
+    for (let waited = 0; waited < 2000; waited += 25) {
+      lateAccount = runtime.snapshot().providers[0]?.accounts?.[0] ?? null;
+      if (lateAccount) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(lateAccount, "runtime must expose the provider after the timed-out refresh settles");
+    assert.notEqual(lateAccount.refresh?.accessTokenExpiresAt, "late");
   } finally {
     release?.();
     await rm(home, { recursive: true, force: true });

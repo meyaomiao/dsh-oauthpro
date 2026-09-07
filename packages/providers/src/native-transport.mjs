@@ -458,6 +458,8 @@ export async function* readSseEvents(response) {
       if (parsed.done) return;
     }
   } catch (error) {
+    // A malformed-payload verdict is deterministic; never rewrite it as a retryable transport fault.
+    if (error?.code === "SSE_PROTOCOL_ERROR") throw error;
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     if (!error?.providerId && error?.name !== "AbortError") {
       // A connection dying mid-SSE (reset, premature close, truncation) is a
