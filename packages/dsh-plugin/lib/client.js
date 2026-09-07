@@ -15686,6 +15686,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-quota-trigger{min-width:58px;width:auto;max-width:128px;justify-content:center;gap:0;padding:0 6px}
 .dockyard-dsh-balance{display:inline-flex;align-items:center;min-height:20px;color:#79d6c8;font-size:12px;font-weight:600;line-height:20px;white-space:nowrap}
 .dockyard-dsh-balance[data-level=critical]{color:#ff8e7d}
+.dockyard-dsh-quota-value{display:inline-flex;align-items:center;min-height:20px;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:12px;font-weight:600;line-height:20px;white-space:nowrap}
+.dockyard-dsh-quota-value[data-level=critical]{color:#ff8e7d}
+.dockyard-dsh-quota-value[data-level=warning]{color:#f0c36a}
 .dockyard-dsh-quota-meter{display:block;position:relative;width:48px;height:5px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
 .dockyard-dsh-quota-meter-fill{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#79d6c8,#b7a3ff);transition:width 220ms ease,background 220ms ease}
 .dockyard-dsh-quota-meter[data-level=warning] .dockyard-dsh-quota-meter-fill{background:linear-gradient(90deg,#f0c36a,#eaa96a)}
@@ -17671,7 +17674,8 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
         "aria-expanded": open,
         onClick: toggleOpen
       },
-      compactIndicator?.type === "balance" ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel) : h("span", {
+      compactIndicator?.type === "balance" ? h("span", { className: "dockyard-dsh-balance", "data-level": quotaLevel }, compactLabel) : h("span", { className: "dockyard-dsh-quota-value", "data-level": quotaLevel }, compactLabel),
+      h("span", {
         className: "dockyard-dsh-quota-meter",
         role: "progressbar",
         "aria-label": `${text(t, "value.quota")} ${compactLabel}`,
