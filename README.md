@@ -1,52 +1,110 @@
-# Dockyard DSH
+<div align="center">
 
-**A native account-pool and provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).**
+# 🔑 dsh-oauthpro · Provider 账户池与额度面板
 
-[中文](#中文) · [English](#english)
+**给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 装上 provider 账户中枢:OAuth 账户池、原生 Key 池、实时余额/额度、三平台自动打开的授权流——macOS / Windows / Linux 一个插件全搞定。**
 
-> **Current status / 当前状态:** Developer preview · macOS / Windows / Linux 兼容（Windows 真机由 CI 矩阵验证）
+[![dsh-plugin](https://img.shields.io/badge/dsh-plugin-4d6bfe)](https://github.com/topics/dsh-plugin)
+[![npm](https://img.shields.io/npm/v/dsh-oauthpro)](https://www.npmjs.com/package/dsh-oauthpro)
+[![CI](https://github.com/meyaomiao/dsh-oauthpro/actions/workflows/ci.yml/badge.svg)](https://github.com/meyaomiao/dsh-oauthpro/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+![node](https://img.shields.io/badge/node-%E2%89%A522-blue)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 
-## 中文
+*CI 在 ubuntu / windows / macos 三平台真机跑同一套 243 项测试,全绿才发版。*
 
-### Dockyard DSH 是什么
+</div>
 
-Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harness，提供一个统一的账号池、模型目录、额度状态和 provider-native 请求入口。它是 DSH 的原生 bundle/plugin，不需要另起一个代理网关，也不把 provider 逻辑塞进 DSH 核心。
+---
 
-当前包含的 provider 模块：
+## ✨ 截图速览
 
-- **Codex** — 官方浏览器 OAuth、CLI fallback 和原生 Responses 请求链路。
-- **Antigravity** — Google 官方浏览器 OAuth、官方本机会话、实时模型目录、额度/credits 和原生 Gemini SSE 请求链路。
-- **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
-- **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
-- **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
+| Provider 弹窗:套餐 + 额度窗口 + 重置时间 |
+|---|
+| ![Provider Popup](docs/screenshots/01-provider-popup.png) |
 
-如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
+| Key 池:凭证状态 + 用量台账 + 上下文上限覆写 |
+|---|
+| ![Key Pool](docs/screenshots/02-key-and-usage.png) |
 
-### 主要功能
+**输入框底栏 chip**:有额度时显示剩余百分比 + 渐变进度条(如 `80% ▬▬▬`),无额度的 provider 回退显示 Key 数量;点击打开上方弹窗。
 
-- 在 DSH 内使用 `/dockyard` 命令管理账号和 provider。
-- 点击“登录添加账号”直接打开 provider 官方浏览器授权页，选择账号并安全导入账号池；provider 不可用时保留 CLI fallback。
-- 扫描本机已有的官方登录态；扫描和新增账号是两个独立操作，已有账号不会被“新增”静默重复导入。
-- 支持手动选择、sticky session、round-robin 和 failover 账号池策略。
-- 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
-- 每个 provider 的每个凭据（API Key ref 或 OAuth 账号）都有独立的本地 Token 使用记录：累计总量、按天汇总和最近请求明细，跟随手动 / 轮询 / 失败转移的每次 Key 切换分别记账，可在弹窗中一键清空；记录只保存凭据引用，永不接触密钥明文。
-- 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
+## 🚀 核心能力
 
-### 平台支持：macOS 已发布，Windows 构建完成
+- **原生 Key 池面板**:每个 API Key provider 一个弹窗——添加/移除 Key、手动/轮询/失败转移三种策略、请求级换 Key 不改写 provider 激活配置;Key 用量(请求数、输入/输出/缓存 token)逐条入账
+- **实时余额/额度**:刷新即查,不猜不伪造——
+  - **DeepSeek 兼容网关** → `GET /user/balance` 余额
+  - **OpenRouter 兼容网关** → `GET /credits` 余额
+  - **z.ai / 智谱 GLM Coding Plan** → `GET /api/monitor/usage/quota/limit`:5 小时 + 月度两个 credits 窗口、使用百分比、重置时间、套餐名
+  - 自定义 provider 按以上三族自动探测;都不兼容则给出明确探测诊断,绝不显示假百分比
+- **OAuth 账户池**:Codex / Claude / Cursor / Grok / Antigravity 等订阅制 provider 的浏览器授权流(PKCE + state 校验),授权页**三平台自动打开**(macOS `open` / Windows `cmd /c start` / Linux `xdg-open`),loopback 与 manual-code 双回调
+- **实时模型目录**:OAuth provider 接官方实时目录(如 Codex 的 gpt-5.6 系列),合并本地注册表,官网上新模型即刻可见
+- **上下文上限覆写**:官方/注册表值缺失时可自定义,只影响 DSH 实际发送的上下文
+- **composer chip**:额度优先、Key 数量兜底,点击弹窗、悬停见模型名
+- **token 台账**:按 provider/account 维度持久化请求与 token 计数,「清空全部用量」一键重置
 
-**当前 0.1.1 版本整理中；插件本体跨平台（macOS / Windows / Linux），macOS 伴侣 App 已从本仓移除。**
+## 📦 安装
 
-macOS 完整功能依赖以下原生能力：
+```bash
+dsh plugin --profile web add github:meyaomiao/dsh-oauthpro
+```
 
-- 凭据存储使用 macOS Keychain 和 Swift helper。
-- 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
-- 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
+重启 `dsh web` 后,输入框底栏出现 provider chip;硬刷新(Cmd/Ctrl+Shift+R)确保 client 为最新。
 
-Windows 版本已完成 EXE 构建，待上传到 v0.1.2 Release；上传完成后再进行发布页下载验证。
+### API Key 配置示例
 
-**DSH 插件（本仓库 dsh-oauth ≥ 0.1.1）的平台支持**：
+`~/.dsh/settings.yaml` 的 `llm-pi-ai.providers` 下:
 
-- macOS：完整体验（Keychain 兜底存储 + 浏览器自动打开）。
-- Windows / Linux：核心功能全部可用——模型目录、OAuth 授权（浏览器自动打开已支持 win32 `cmd /c start` 与 Linux `xdg-open`）、余额/额度探测、Key 池面板；凭证经 DSH Credentials（`~/.dsh/.credentials.yaml`）持久化。
-- Cursor / Antigravity 桌面 App 凭证扫描为 macOS 专属，其他平台自动跳过并回退 env 等替代源。
+```yaml
+  zai:
+    apiKeyEnv: ZAI_API_KEY
+    models:
+      - glm-5.3-flash
+```
 
+Key 值放 `~/.dsh/.credentials.yaml`:
+
+```yaml
+refs:
+  ZAI_API_KEY: <your-key>
+```
+
+OAuth 类 provider(Codex 等)不填 Key,在弹窗里点登录走浏览器授权即可。
+
+## 🔩 工作原理
+
+```
+┌─ client(lib/client.js)────────────┐   ┌─ host(dist/index.mjs)─────────────┐
+│ composer chip + provider 弹窗      │ ⇄ │ OAuth 账户池 / Key 池 / 刷新编排    │
+│ typert RPC → remote.dockyard      │   │ 余额/额度探测(DeepSeek/OpenRouter/ │
+│ slots: conversation.input.left    │   │ z.ai 三族) / token 台账 / 状态落盘  │
+└───────────────────────────────────┘   └───────────────────────────────────┘
+```
+
+- 凭证只经 **DSH Credentials**(`~/.dsh/.credentials.yaml`)落盘,浏览器不存 Key、不回显
+- 余额/额度探测按 baseURL 自动识别协议族;Windows 上无系统级 Keychain 时兜底存储自动降级并明确提示,主路不受影响
+
+## 🧪 平台兼容
+
+| 平台 | 状态 | 说明 |
+|---|---|---|
+| macOS | ✅ 完整 | Keychain 兜底存储 + 授权页自动打开 |
+| Windows | ✅ 核心全量 | 授权页自动打开(`cmd /c start`);CI windows-latest 真机跑全套测试 |
+| Linux | ✅ 核心全量 | 授权页自动打开(`xdg-open`) |
+| Cursor / Antigravity 桌面凭证扫描 | macOS 专属 | 其他平台自动跳过,回退 env 等替代源 |
+
+## 🛠 开发
+
+```bash
+npm install
+npm run build   # inject 门禁校验 → 平台构建 → client/host 产物
+npm test        # 243 项测试(本地需 node ≥ 22.19 或 ≥ 24)
+```
+
+- 产物:`packages/dsh-plugin/lib/client.js`(client)+ `packages/dsh-plugin/dist/index.mjs`(host);DSH 加载的是产物不是 src
+- `npm run build` 第一步即校验 `dsh.client.inject` 与本机 DSH 安装一致,平台包漂移在构建期拦截
+- 提交走 workflow:Issue → `issue-N-slug` 分支 → PR
+
+## 📄 License
+
+[MIT](./LICENSE) © meyaomiao
