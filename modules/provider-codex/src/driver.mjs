@@ -699,6 +699,61 @@ export class CodexOAuthDriver {
   }
 }
 
+const GPT_HIDDEN_ARG_KEYS = Object.freeze(["sandbox_permissions", "justification"]);
+
+/**
+ * GPT fills sandbox_permissions/justification the moment it sees them in the
+ * bash/write/edit schemas, and with a top-level clearance those keys trip the
+ * escalation check. Codex conversations only: strip the fields from the
+ * schemas we advertise and from the tool calls GPT emits.
+ */
+function dropHiddenKeysDeep(node) {
+  if (Array.isArray(node)) {
+    for (const entry of node) dropHiddenKeysDeep(entry);
+    return node;
+  }
+  if (!node || typeof node !== "object") return node;
+  for (const key of GPT_HIDDEN_ARG_KEYS) delete node[key];
+  if (Array.isArray(node.required)) node.required = node.required.filter((key) => !GPT_HIDDEN_ARG_KEYS.includes(key));
+  for (const value of Object.values(node)) dropHiddenKeysDeep(value);
+  return node;
+}
+
+function dropSentencesMentioningHiddenKeys(description) {
+  if (typeof description !== "string" || description.length === 0) return description;
+  const sentences = description.split(/(?<=[。.!?！？])\s*/);
+  const kept = sentences.filter((sentence) => !GPT_HIDDEN_ARG_KEYS.some((key) => sentence.includes(key)));
+  return kept.length > 0 ? kept.join(" ") : description;
+}
+
+export function sanitizeCodexTools(tools) {
+  if (!Array.isArray(tools)) return tools;
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== "object") return tool;
+    return {
+      ...tool,
+      description: dropSentencesMentioningHiddenKeys(tool.description),
+      ...(tool.parameters !== undefined
+        ? { parameters: dropHiddenKeysDeep(structuredClone(tool.parameters)) }
+        : {}),
+    };
+  });
+}
+
+function stripHiddenKeysFromToolCallArguments(chunk) {
+  if (chunk?.type !== "block-end" || chunk.block?.type !== "tool-call" || typeof chunk.block.arguments !== "string") {
+    return chunk;
+  }
+  try {
+    const args = JSON.parse(chunk.block.arguments);
+    if (!GPT_HIDDEN_ARG_KEYS.some((key) => key in args)) return chunk;
+    for (const key of GPT_HIDDEN_ARG_KEYS) delete args[key];
+    return { ...chunk, block: { ...chunk.block, arguments: JSON.stringify(args) } };
+  } catch {
+    return chunk;
+  }
+}
+
 export function createCodexPiAiExecutor({
   PiAiAdapter,
   createProvider,
@@ -777,8 +832,21 @@ export function createCodexPiAiExecutor({
     // Codex driver callers and tests that do not mount attachments.
     resolveAttachments: () => context.attachments,
   });
-  return adapter.stream(request);
+  // Codex routes serve GPT conversations exclusively, so the schema/argument
+  // scrub below only ever applies to GPT turns.
+  const prepared = Array.isArray(request.tools)
+    ? { ...request, tools: sanitizeCodexTools(request.tools) }
+    : request;
+  if (!Array.isArray(request.tools)) return adapter.stream(prepared);
+  const upstream = adapter.stream(prepared);
+  if (!upstream || typeof upstream[Symbol.asyncIterator] !== "function") return upstream;
+  return (async function* stripCodexToolCallKeys() {
+    for await (const chunk of upstream) {
+      yield stripHiddenKeysFromToolCallArguments(chunk);
+    }
+  })();
   };
+
 }
 
 async function nativeCodexExecutor(envelope) {
