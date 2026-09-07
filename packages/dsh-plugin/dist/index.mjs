@@ -13066,7 +13066,8 @@ function cleanRecord(raw) {
   })) : [];
   return {
     policy: POLICIES.has(raw?.policy) ? raw.policy : "manual",
-    keys
+    keys,
+    lastQuota: raw?.lastQuota && typeof raw.lastQuota === "object" ? raw.lastQuota : void 0
   };
 }
 function publicCredential(info) {
@@ -13327,7 +13328,7 @@ var NativeKeyPoolHost = class {
       })),
       tokenTotals: tokenUsage?.totals ?? null,
       tokenUpdatedAt: tokenUsage?.updatedAt ?? null,
-      quota: null,
+      quota: synced.record.lastQuota?.quota ?? null,
       usage: null
     };
   }
@@ -13627,6 +13628,10 @@ var NativeKeyPoolHost = class {
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
     const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
+    if (active?.quota) {
+      synced.record.lastQuota = { quota: active.quota, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      await this.saveState();
+    }
     const tokenUsage = this.usageSnapshot(providerId);
     return {
       providerId,
