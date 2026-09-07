@@ -15686,7 +15686,7 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-quota-trigger{min-width:58px;width:auto;max-width:128px;justify-content:center;gap:0;padding:0 6px}
 .dockyard-dsh-balance{display:inline-flex;align-items:center;min-height:20px;color:#79d6c8;font-size:12px;font-weight:600;line-height:20px;white-space:nowrap}
 .dockyard-dsh-balance[data-level=critical]{color:#ff8e7d}
-.dockyard-dsh-quota-value{display:inline-flex;align-items:center;min-height:20px;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:12px;font-weight:600;line-height:20px;white-space:nowrap}
+.dockyard-dsh-quota-value{display:inline-flex;align-items:center;margin-right:2px;min-height:20px;color:var(--dsw-alias-label-secondary,#c7ccd5);font-size:12px;font-weight:600;line-height:20px;white-space:nowrap}
 .dockyard-dsh-quota-value[data-level=critical]{color:#ff8e7d}
 .dockyard-dsh-quota-value[data-level=warning]{color:#f0c36a}
 .dockyard-dsh-quota-meter{display:block;position:relative;width:48px;height:5px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
