@@ -1,5 +1,5 @@
 {
-  "name": "dsh-oauth-mac-install",
+  "name": "dsh-oauthpro-install",
   "version": "0.1.2",
   "description": "One-command installer for the Dockyard DSH plugin.",
   "license": "MIT",
@@ -8,7 +8,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "bin": {
-    "dsh-oauth-mac-install": "./bin/install.mjs"
+    "dsh-oauthpro-install": "./bin/install.mjs"
   },
   "files": [
     "bin",

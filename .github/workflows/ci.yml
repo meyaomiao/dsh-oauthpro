@@ -11,7 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ["22.19", "24"]
-    runs-on: ubuntu-latest
+        # Real Windows verification: the suite is platform-neutral, and the
+        # browser-open / credential paths must behave without macOS services.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -60,9 +63,5 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
-      - name: Swift syntax gates
-        run: |
-          xcrun swiftc -parse apps/macos/DockyardDSH/Sources/main.swift
-          xcrun swiftc -parse packages/vault/src/macos-keychain-helper.swift
-      - name: Build script syntax gate
-        run: bash -n apps/macos/build-dmg.sh
+      - name: Keychain helper Swift syntax gate
+        run: xcrun swiftc -parse packages/vault/src/macos-keychain-helper.swift

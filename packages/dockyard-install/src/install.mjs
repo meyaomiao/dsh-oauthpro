@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-export const DEFAULT_PLUGIN_SPEC = "dsh-oauth-mac@latest";
+export const DEFAULT_PLUGIN_SPEC = "dsh-oauthpro@latest";
 export const DEFAULT_DSH_SPEC = "@deepseek-ai/dsh@0.1.1-rc.2";
 export const DEFAULT_PROFILE = "web";
 
@@ -9,7 +9,7 @@ function printUsage() {
   console.log(`Dockyard DSH one-command installer
 
 Usage:
-  npx -y dsh-oauth-mac-install@latest
+  npx -y dsh-oauthpro-install@latest
 
 Options:
   --profile <name>       Install into a different DSH profile (default: web)
