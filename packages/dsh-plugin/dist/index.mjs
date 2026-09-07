@@ -4109,6 +4109,7 @@ async function* readSseEvents(response) {
       if (parsed.done) return;
     }
   } catch (error) {
+    if (error?.code === "SSE_PROTOCOL_ERROR") throw error;
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     if (!error?.providerId && error?.name !== "AbortError") {
       const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion");

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const PACKAGE = "dsh-oauth-mac";
+const PACKAGE = "dsh-oauthpro";
 
 const typeSymbol = (name) => `${PACKAGE}/client#${name}`;
 const codec = (schema, name) => ({

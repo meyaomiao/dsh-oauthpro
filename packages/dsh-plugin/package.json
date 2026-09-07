@@ -1,5 +1,5 @@
 {
-  "name": "dsh-oauth-mac",
+  "name": "dsh-oauthpro",
   "version": "0.1.1",
   "description": "A macOS-only native account-pool and provider plugin for DeepSeek Harness.",
   "license": "MIT",
@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/meyaomiao/dsh-oauth-mac.git"
+    "url": "https://github.com/meyaomiao/dsh-oauth.git"
   },
   "main": "./dist/index.mjs",
   "exports": {

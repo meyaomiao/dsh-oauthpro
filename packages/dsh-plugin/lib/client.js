@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: "dsh-oauth-mac",
+  id: "dsh-oauthpro",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
@@ -14558,7 +14558,7 @@ function date4(params) {
 config(en_default());
 
 // packages/dsh-plugin/src/dockyard-typert-shared.mjs
-var PACKAGE = "dsh-oauth-mac";
+var PACKAGE = "dsh-oauthpro";
 var typeSymbol = (name) => `${PACKAGE}/client#${name}`;
 var codec2 = (schema, name) => ({
   mode: "strict",
