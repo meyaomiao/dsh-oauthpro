@@ -1,6 +1,6 @@
 {
   "name": "dsh-oauthpro",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A macOS-only native account-pool and provider plugin for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
