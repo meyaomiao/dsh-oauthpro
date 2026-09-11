@@ -2107,16 +2107,20 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
         }, h("span", {
           className: "dockyard-dsh-quota-meter-fill",
           style: { width: `${quotaValue}%` },
-        }))) : null,
-    !compactVisible && currentProviderId && currentNative ? h("button", {
+        }))) : h("button", {
       type: "button",
       className: "dockyard-dsh-trigger",
       title: currentProviderId
         ? `${text(t, "trigger.providerModel", { provider: providerLabel, model: modelLabel })}`
+        : text(t, "trigger.subscriptionManagement"),
+      "aria-label": currentProviderId
+        ? text(t, "trigger.providerModel", { provider: providerLabel, model: modelLabel })
         : text(t, "subscription.aria"),
       "aria-expanded": open,
       onClick: toggleOpen,
-    }, text(t, "summary.keyCount", { count: currentNative.keys?.filter((entry) => entry.configured).length ?? 0 })) : null,
+    }, currentProviderId && currentNative
+      ? text(t, "summary.keyCount", { count: currentNative.keys?.filter((entry) => entry.configured).length ?? 0 })
+      : providerLabel),
     overviewOpen ? h(SubscriptionOverviewPopup, {
       providers,
       directoryState,

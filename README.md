@@ -15,6 +15,22 @@
 
 </div>
 
+## ⭐ 欢迎点星收藏
+
+如果 dsh-oauthpro 帮到了你，欢迎到 [GitHub 仓库](https://github.com/meyaomiao/dsh-oauthpro) 点个 Star ⭐，让更多 DSH 用户看到它。问题与建议请提 Issue。
+
+## 📋 兼容性
+
+| 插件版本 | 状态 | 对应 DSH |
+|---|---|---|
+| **0.1.2**（当前） | ✅ | **0.1.5-rc.1 / 0.1.5-rc.2**（及之后的 0.1.5 线）；同时覆盖 0.1.1-rc.2 ～ 0.1.2-rc.1 |
+
+### 本次升级功能变化
+
+- **官方已有的交给官方**：不画赞踩、不画交付文件卡。本插件只做账户池 / 额度 chip。
+- 无功能移除。chip 在查不到额度时仍显示「订阅管理」入口，可点开再查。
+- 三个注入包（`dsh-api-remotes` / `dsh-client-ui-model-selection` / `dsh-client-ui-conversation`）在 0.1.5 上 API 与 0.1.2 核对为零 diff。
+
 ---
 
 ## ✨ 截图速览
