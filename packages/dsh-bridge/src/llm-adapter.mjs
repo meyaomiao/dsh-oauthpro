@@ -366,6 +366,19 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       return PROVIDER_RETRY_POLICY;
     },
 
+    /**
+     * DSH ≥ 0.1.5-rc.2 meters request pressure by asking the owning adapter
+     * for image pricing on every measurement. The harness's own `LlmAdapter`
+     * declares an empty default, but this bridge returns a structural object
+     * and never inherits it — so the hook has to exist here. A missing method
+     * surfaces as `adapter.imageRequestPricing is not a function` inside
+     * token-meter, which silently disables automatic compaction and makes
+     * `/compact` fail for every route this adapter owns.
+     */
+    imageRequestPricing(_provider, _model) {
+      return undefined;
+    },
+
     invalidateCatalog,
     refreshCatalog,
 
