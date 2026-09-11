@@ -15,6 +15,22 @@
 
 </div>
 
+## ⭐ 欢迎点星收藏
+
+如果 dsh-oauthpro 帮到了你，欢迎到 [GitHub 仓库](https://github.com/meyaomiao/dsh-oauthpro) 点个 Star ⭐，让更多 DSH 用户看到它。问题与建议请提 Issue。
+
+## 📋 兼容性
+
+| 插件版本 | 状态 | 对应 DSH |
+|---|---|---|
+| **0.1.2**（当前） | ✅ | **0.1.5-rc.1 / 0.1.5-rc.2**（及之后的 0.1.5 线）；同时覆盖 0.1.1-rc.2 ～ 0.1.2-rc.1 |
+
+### 本次升级功能变化
+
+- **官方已有的交给官方**：不画赞踩、不画交付文件卡。本插件只做账户池 / 额度 chip。
+- 无功能移除。chip 在查不到额度时仍显示「订阅管理」入口，可点开再查。
+- 三个注入包（`dsh-api-remotes` / `dsh-client-ui-model-selection` / `dsh-client-ui-conversation`）在 0.1.5 上 API 与 0.1.2 核对为零 diff。
+
 ---
 
 ## ✨ 截图速览
@@ -84,16 +100,6 @@ OAuth 类 provider(Codex 等)不填 Key,在弹窗里点登录走浏览器授权�
 - 凭证只经 **DSH Credentials**(`~/.dsh/.credentials.yaml`)落盘,浏览器不存 Key、不回显
 - 余额/额度探测按 baseURL 自动识别协议族;Windows 上无系统级 Keychain 时兜底存储自动降级并明确提示,主路不受影响
 
-## 📋 DSH 兼容性
-
-| DSH 版本线 | 状态 | 说明 |
-|---|---|---|
-| **0.1.5-rc.1+**(npm latest) | ✅ 当前版 0.1.2 即兼容,无需升级插件 | 三个注入服务包(`dsh-api-remotes` / `dsh-client-ui-model-selection` / `dsh-client-ui-conversation`)新旧版 API 逐项核对为零 diff;`dsh-client-runtime` 时代遗留已清 |
-| 0.1.1-rc.2 ~ 0.1.2-rc.1 | ✅ | 既有支持范围 |
-
-- DSH 0.1.3+ 将 pi-ai 升至 0.85.1:provider 探测与模型目录逻辑已随 0.1.5-rc.1 回归验证;若遇「模型设置入口消失」请先升级到 DSH 0.1.5-alpha.2+(官方已在 rc 线修复该 bug)
-- 无功能移除;无插件侧破坏性 API 变更
-
 ## 🧪 平台兼容
 
 | 平台 | 状态 | 说明 |
@@ -114,10 +120,6 @@ npm test        # 243 项测试(本地需 node ≥ 22.19 或 ≥ 24)
 - 产物:`packages/dsh-plugin/lib/client.js`(client)+ `packages/dsh-plugin/dist/index.mjs`(host);DSH 加载的是产物不是 src
 - `npm run build` 第一步即校验 `dsh.client.inject` 与本机 DSH 安装一致,平台包漂移在构建期拦截
 - 提交走 workflow:Issue → `issue-N-slug` 分支 → PR
-
-## ⭐ 支持这个项目
-
-如果 dsh-oauthpro 帮到了你,欢迎到 [GitHub 仓库](https://github.com/meyaomiao/dsh-oauthpro) 点个 Star ⭐,让更多 DSH 用户看到它。问题与功能建议请提 Issue。
 
 ## 📄 License
 
