@@ -24,7 +24,7 @@ function publicSession(session) {
 export function createOfficialSessionAuthorizer({
   providerId,
   source = "official_client",
-  instructions = "请在官方客户端完成登录，完成后回到 Dockyard DSH。",
+  instructions = "请在官方客户端完成登录，完成后回到 oauthpro。",
   timeoutMs = DEFAULT_TIMEOUT_MS,
   browserOpened = false,
   readSession,

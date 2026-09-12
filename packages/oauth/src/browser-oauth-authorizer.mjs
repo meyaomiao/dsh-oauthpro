@@ -158,7 +158,7 @@ export function createBrowserOAuthAuthorizer({
   function responseHtml(res, title, message, statusCode = 200) {
     res.statusCode = statusCode;
     res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>可以关闭此页面并返回 Dockyard DSH。</p>`);
+    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>可以关闭此页面并返回 oauthpro。</p>`);
   }
 
   async function handleCallback(session, req, res) {
@@ -189,7 +189,7 @@ export function createBrowserOAuthAuthorizer({
       return;
     }
     session.callback = { code, state };
-    responseHtml(res, "授权成功", "已收到授权回调，正在返回 Dockyard DSH。");
+    responseHtml(res, "授权成功", "已收到授权回调，正在返回 oauthpro。");
   }
 
   async function openCallbackServer(session) {

@@ -362,7 +362,7 @@ export class ClaudeSubscriptionDriver {
       ? createOfficialSessionAuthorizer({
         providerId: PROVIDER_ID,
         source: sessionSource,
-        instructions: "请在 Claude 官方客户端完成登录，完成后回到 Dockyard DSH。",
+        instructions: "请在 Claude 官方客户端完成登录，完成后回到 oauthpro。",
         readSession: async (context = {}) => {
           const status = await this.#activeStatus(context.signal);
           const candidate = candidateFromStatus(status, {
@@ -379,7 +379,7 @@ export class ClaudeSubscriptionDriver {
       loginArgs: ["auth", "login", "--claudeai"],
       environment: env,
       browserOpened: true,
-      instructions: "已启动官方 Claude CLI OAuth 登录。请在 Claude 官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Claude CLI OAuth 登录。请在 Claude 官方网页完成登录，完成后回到 oauthpro。",
       importStatus: async (context) => {
         const status = await this.#activeStatus();
         if (!status.loggedIn || !status.isSubscription) return [];
@@ -395,7 +395,7 @@ export class ClaudeSubscriptionDriver {
         redirectUri,
         callbackPort: 0,
         authorizationCodeRequired: true,
-        instructions: "请在官方 Claude 授权页面选择账号并完成授权，然后将页面返回的授权码粘贴回 Dockyard DSH。",
+        instructions: "请在官方 Claude 授权页面选择账号并完成授权，然后将页面返回的授权码粘贴回 oauthpro。",
         authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
           const url = new URL(authorizationUrl);
           url.search = new URLSearchParams({
@@ -650,7 +650,7 @@ export class ClaudeSubscriptionDriver {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "已检测到 Claude 官方会话，当前账号已接入 Dockyard DSH。",
+        instructions: "已检测到 Claude 官方会话，当前账号已接入 oauthpro。",
         accounts: [account],
         diagnostic: null,
       };

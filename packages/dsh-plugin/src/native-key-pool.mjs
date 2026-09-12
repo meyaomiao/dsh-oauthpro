@@ -280,7 +280,7 @@ export class NativeKeyPoolController {
       const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
       try {
-        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read Dockyard Key pool"));
+        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read oauthpro Key pool"));
       } catch {
         // A local debug page may be running without the host remote. The DSH
         // credentials/settings view above remains a useful read-only fallback.
@@ -372,7 +372,7 @@ export class NativeKeyPoolController {
         createdAt: new Date().toISOString(),
       }];
       writeMetadata(providerId, metadata);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register oauthpro Key"));
       await this.load(providerId);
       this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
@@ -399,7 +399,7 @@ export class NativeKeyPoolController {
       if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
       if (!key.configured) throw new Error(this.t?.("native.error.keyNotConfigured") ?? "This Key is not configured in DSH Credentials");
       await this.mutateProfile(providerId, ref);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register oauthpro Key"));
       await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, this.operation("native.operation.setManualKey", "Switch to manual Key"));
       const metadata = readMetadata(providerId);
       metadata.policy = "manual";
@@ -432,7 +432,7 @@ export class NativeKeyPoolController {
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
       try {
-        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove Dockyard Key"));
+        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove oauthpro Key"));
       } catch {
         // The credential/config removal already succeeded. The host resolver
         // also ignores an unconfigured stale ref, so this is safe to retry.

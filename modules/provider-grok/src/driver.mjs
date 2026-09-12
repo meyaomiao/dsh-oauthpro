@@ -633,7 +633,7 @@ export class GrokOAuthDriver {
       environment: env,
       profileDirectory: this.grokHome,
       browserOpened: true,
-      instructions: "已启动官方 Grok CLI OAuth 登录。请在 auth.x.ai 官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Grok CLI OAuth 登录。请在 auth.x.ai 官方网页完成登录，完成后回到 oauthpro。",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context),
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
@@ -642,7 +642,7 @@ export class GrokOAuthDriver {
         callbackPath: "/callback",
         callbackHost: "127.0.0.1",
         callbackPort: 0,
-        instructions: "请在官方 Grok 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        instructions: "请在官方 Grok 授权页面选择账号并完成授权；完成后会自动返回 oauthpro。",
         authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri, nonce }) => {
           const url = new URL(authorizationUrl);
           url.search = new URLSearchParams({
@@ -763,7 +763,7 @@ export class GrokOAuthDriver {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "已检测到 Grok 官方 OAuth 会话，当前账号已接入 Dockyard DSH。",
+        instructions: "已检测到 Grok 官方 OAuth 会话，当前账号已接入 oauthpro。",
         accounts,
         diagnostic: null,
       };

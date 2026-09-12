@@ -67,7 +67,7 @@ export function createCliStatusAuthorizer({
   loginArgs,
   environment = process.env,
   timeoutMs = 10 * 60 * 1000,
-  instructions = "请在官方授权页面完成登录，完成后回到 Dockyard DSH。",
+  instructions = "请在官方授权页面完成登录，完成后回到 oauthpro。",
   browserOpened = false,
   importStatus,
 } = {}) {

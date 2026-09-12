@@ -2359,7 +2359,7 @@ function createBrowserOAuthAuthorizer({
   function responseHtml(res, title, message, statusCode = 200) {
     res.statusCode = statusCode;
     res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u8FD4\u56DE Dockyard DSH\u3002</p>`);
+    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u8FD4\u56DE oauthpro\u3002</p>`);
   }
   async function handleCallback(session, req, res) {
     const requestUrl = new URL(req.url ?? "/", "http://localhost");
@@ -2389,7 +2389,7 @@ function createBrowserOAuthAuthorizer({
       return;
     }
     session.callback = { code, state };
-    responseHtml(res, "\u6388\u6743\u6210\u529F", "\u5DF2\u6536\u5230\u6388\u6743\u56DE\u8C03\uFF0C\u6B63\u5728\u8FD4\u56DE Dockyard DSH\u3002");
+    responseHtml(res, "\u6388\u6743\u6210\u529F", "\u5DF2\u6536\u5230\u6388\u6743\u56DE\u8C03\uFF0C\u6B63\u5728\u8FD4\u56DE oauthpro\u3002");
   }
   async function openCallbackServer(session) {
     if (session.callbackPort === null || session.callbackPort === void 0) return;
@@ -2694,7 +2694,7 @@ function createCliOAuthAuthorizer({
   authFileName = "auth.json",
   environment = process.env,
   profilePrefix = `dockyard-${providerId ?? "provider"}-oauth-`,
-  instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+  instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
   timeoutMs = DEFAULT_TIMEOUT_MS2,
   importCredentials,
   profileDirectory = null,
@@ -3162,7 +3162,7 @@ var CodexOAuthDriver = class {
       cliPath,
       loginArgs: ["login", "--device-auth"],
       environmentKey: "CODEX_HOME",
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Codex CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728\u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Codex CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728\u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context)
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
@@ -3171,7 +3171,7 @@ var CodexOAuthDriver = class {
       callbackPath: new URL(redirectUri).pathname,
       callbackHost: "localhost",
       callbackPort: browserCallbackPort,
-      instructions: "\u8BF7\u5728\u5B98\u65B9 Codex \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Codex \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE oauthpro\u3002",
       authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
         const url = new URL(authorizationUrl);
         url.search = new URLSearchParams({
@@ -3280,7 +3280,7 @@ var CodexOAuthDriver = class {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "\u5DF2\u68C0\u6D4B\u5230 Codex \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Codex \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 oauthpro\u3002",
         accounts,
         diagnostic: null
       };
@@ -3584,10 +3584,10 @@ function createCodexPiAiExecutor({
       baseUrl: DEFAULT_CODEX_BASE_URL,
       auth: {
         apiKey: {
-          name: "Dockyard DSH OAuth",
+          name: "oauthpro OAuth",
           resolve: ({ credential: supplied }) => ({
             auth: { apiKey: supplied?.key },
-            source: "Dockyard DSH OAuth"
+            source: "oauthpro OAuth"
           })
         }
       },
@@ -6208,7 +6208,7 @@ var AntigravityOfficialSessionDriver = class {
       callbackPath: new URL(redirectUri).pathname,
       callbackHost: new URL(redirectUri).hostname,
       callbackPort: Number(new URL(redirectUri).port || 51121),
-      instructions: "\u8BF7\u5728 Google \u5B98\u65B9\u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728 Google \u5B98\u65B9\u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE oauthpro\u3002",
       authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
         access_type: "offline",
         client_id: clientId,
@@ -6660,7 +6660,7 @@ var AntigravityOfficialSessionDriver = class {
       return {
         status: "completed",
         providerId: PROVIDER_ID3,
-        instructions: "\u5DF2\u68C0\u6D4B\u5230 Antigravity \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Antigravity \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 oauthpro\u3002",
         accounts: [account],
         diagnostic: null
       };
@@ -7319,7 +7319,7 @@ var GrokOAuthDriver = class {
       environment: env,
       profileDirectory: this.grokHome,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Grok CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 auth.x.ai \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Grok CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 auth.x.ai \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context)
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
@@ -7327,7 +7327,7 @@ var GrokOAuthDriver = class {
       callbackPath: "/callback",
       callbackHost: "127.0.0.1",
       callbackPort: 0,
-      instructions: "\u8BF7\u5728\u5B98\u65B9 Grok \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Grok \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE oauthpro\u3002",
       authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri, nonce }) => {
         const url = new URL(authorizationUrl);
         url.search = new URLSearchParams({
@@ -7442,7 +7442,7 @@ var GrokOAuthDriver = class {
       return {
         status: "completed",
         providerId: PROVIDER_ID4,
-        instructions: "\u5DF2\u68C0\u6D4B\u5230 Grok \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Grok \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 oauthpro\u3002",
         accounts,
         diagnostic: null
       };
@@ -8020,7 +8020,7 @@ function createCliStatusAuthorizer({
   loginArgs,
   environment = process.env,
   timeoutMs = 10 * 60 * 1e3,
-  instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+  instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
   browserOpened = false,
   importStatus
 } = {}) {
@@ -8165,7 +8165,7 @@ function publicSession4(session) {
 function createOfficialSessionAuthorizer({
   providerId,
   source = "official_client",
-  instructions = "\u8BF7\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+  instructions = "\u8BF7\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
   timeoutMs = DEFAULT_TIMEOUT_MS3,
   browserOpened = false,
   readSession,
@@ -8883,7 +8883,7 @@ var ClaudeSubscriptionDriver = class {
     this.clientSessionAuthorizer = typeof sessionReader === "function" ? createOfficialSessionAuthorizer({
       providerId: PROVIDER_ID7,
       source: sessionSource,
-      instructions: "\u8BF7\u5728 Claude \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728 Claude \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       readSession: async (context = {}) => {
         const status = await this.#activeStatus(context.signal);
         const candidate2 = candidateFromStatus(status, {
@@ -8899,7 +8899,7 @@ var ClaudeSubscriptionDriver = class {
       loginArgs: ["auth", "login", "--claudeai"],
       environment: env,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Claude CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Claude \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Claude CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Claude \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       importStatus: async (context) => {
         const status = await this.#activeStatus();
         if (!status.loggedIn || !status.isSubscription) return [];
@@ -8914,7 +8914,7 @@ var ClaudeSubscriptionDriver = class {
       redirectUri,
       callbackPort: 0,
       authorizationCodeRequired: true,
-      instructions: "\u8BF7\u5728\u5B98\u65B9 Claude \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF0C\u7136\u540E\u5C06\u9875\u9762\u8FD4\u56DE\u7684\u6388\u6743\u7801\u7C98\u8D34\u56DE Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Claude \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF0C\u7136\u540E\u5C06\u9875\u9762\u8FD4\u56DE\u7684\u6388\u6743\u7801\u7C98\u8D34\u56DE oauthpro\u3002",
       authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
         const url = new URL(authorizationUrl);
         url.search = new URLSearchParams({
@@ -9147,7 +9147,7 @@ var ClaudeSubscriptionDriver = class {
       return {
         status: "completed",
         providerId: PROVIDER_ID7,
-        instructions: "\u5DF2\u68C0\u6D4B\u5230 Claude \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Claude \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 oauthpro\u3002",
         accounts: [account],
         diagnostic: null
       };
@@ -10720,7 +10720,7 @@ var CursorSubscriptionDriver = class {
     this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
       providerId: PROVIDER_ID9,
       source: sessionSource,
-      instructions: "\u8BF7\u5728 Cursor \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728 Cursor \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       readSession: async (context = {}) => {
         const status = this.sessionReader ? await this.#readStatus(context.signal) : (() => {
           const desktop2 = this.#readDesktopSession();
@@ -10738,7 +10738,7 @@ var CursorSubscriptionDriver = class {
       loginArgs: ["login"],
       environment: env,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Cursor CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Cursor \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Cursor CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Cursor \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 oauthpro\u3002",
       importStatus: async (context) => {
         const status = await this.#readStatus();
         if (!status.loggedIn) return [];
@@ -10750,7 +10750,7 @@ var CursorSubscriptionDriver = class {
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
       providerId: PROVIDER_ID9,
-      instructions: "\u8BF7\u5728\u5B98\u65B9 Cursor \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Cursor \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE oauthpro\u3002",
       authorizationUrlBuilder: async () => {
         const verifier = randomBytes3(32).toString("base64url");
         const challenge = createHash9("sha256").update(verifier).digest("base64url");
@@ -10980,7 +10980,7 @@ var CursorSubscriptionDriver = class {
       return {
         status: "completed",
         providerId: PROVIDER_ID9,
-        instructions: "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 oauthpro\u3002",
         accounts: [account],
         diagnostic: null
       };
@@ -12420,7 +12420,7 @@ var DockyardDshService = class {
   helpText() {
     const providers = (this.runtime.listProviderManifests?.() ?? []).map((manifest) => `${manifest.id} (${providerName(manifest)})`);
     return [
-      "Dockyard DSH \u539F\u751F\u547D\u4EE4\uFF1A",
+      "oauthpro \u539F\u751F\u547D\u4EE4\uFF1A",
       "/dockyard status                         \u67E5\u770B\u8D26\u53F7\u3001\u5B9E\u65F6\u989D\u5EA6\u548C\u5237\u65B0\u65F6\u95F4",
       "/dockyard scan [provider]                \u626B\u63CF\u672C\u673A\u5B98\u65B9\u767B\u5F55\u6001",
       "/dockyard add [provider] [candidateId]   \u6DFB\u52A0\u626B\u63CF\u5230\u7684 OAuth \u8D26\u53F7",
@@ -12480,10 +12480,10 @@ var DockyardDshService = class {
 function createDockyardCommand(service) {
   return {
     name: "dockyard",
-    description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
+    description: "Manage oauthpro providers, OAuth accounts, quotas, models, and account selection",
     input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
     handler: async ({ rawInput, signal }) => {
-      if (signal?.aborted) return commandError("Dockyard \u547D\u4EE4\u5DF2\u53D6\u6D88\u3002");
+      if (signal?.aborted) return commandError("oauthpro \u547D\u4EE4\u5DF2\u53D6\u6D88\u3002");
       const [verb = "help", ...args] = commandTokens(rawInput);
       try {
         switch (verb.toLowerCase()) {
@@ -12491,7 +12491,7 @@ function createDockyardCommand(service) {
             return commandSuccess(service.helpText());
           case "status": {
             const snapshot = await service.snapshot();
-            const lines = ["Dockyard DSH \u72B6\u6001", `\u66F4\u65B0\u65F6\u95F4\uFF1A${displayTime(snapshot.generatedAt)}`];
+            const lines = ["oauthpro \u72B6\u6001", `\u66F4\u65B0\u65F6\u95F4\uFF1A${displayTime(snapshot.generatedAt)}`];
             for (const provider of snapshot.providers ?? []) {
               lines.push(`
 ${providerName(provider.manifest)} [${provider.providerId}]`);
@@ -12576,12 +12576,12 @@ ${providerName(provider.manifest)} [${provider.providerId}]`);
             return commandSuccess(`OAuth \u4F1A\u8BDD ${result.sessionId}\uFF1A${result.status}`);
           }
           default:
-            return commandError(`\u672A\u77E5 Dockyard \u5B50\u547D\u4EE4\uFF1A${verb}
+            return commandError(`\u672A\u77E5 oauthpro \u5B50\u547D\u4EE4\uFF1A${verb}
 
 ${service.helpText()}`);
         }
       } catch (error) {
-        return commandError(`Dockyard \u547D\u4EE4\u5931\u8D25\uFF1A${redactError(error)}`);
+        return commandError(`oauthpro \u547D\u4EE4\u5931\u8D25\uFF1A${redactError(error)}`);
       }
     }
   };

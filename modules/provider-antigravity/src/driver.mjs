@@ -1619,7 +1619,7 @@ export class AntigravityOfficialSessionDriver {
         callbackPath: new URL(redirectUri).pathname,
         callbackHost: new URL(redirectUri).hostname,
         callbackPort: Number(new URL(redirectUri).port || 51121),
-        instructions: "请在 Google 官方授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        instructions: "请在 Google 官方授权页面选择账号并完成授权；完成后会自动返回 oauthpro。",
         authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
           access_type: "offline",
           client_id: clientId,
@@ -2142,7 +2142,7 @@ export class AntigravityOfficialSessionDriver {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "已检测到 Antigravity 官方会话，当前账号已接入 Dockyard DSH。",
+        instructions: "已检测到 Antigravity 官方会话，当前账号已接入 oauthpro。",
         accounts: [account],
         diagnostic: null,
       };
