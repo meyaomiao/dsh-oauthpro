@@ -88,7 +88,10 @@ export function apply(ctx, config = {}) {
         registryLoader: modelRegistryLoader,
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
-      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader({
+        ...(runtimeOptions.cursor ?? {}),
+        registryLoader: modelRegistryLoader,
+      }),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     runtimeOptions.usageLedger = runtimeOptions.usageLedger ?? usageLedger;

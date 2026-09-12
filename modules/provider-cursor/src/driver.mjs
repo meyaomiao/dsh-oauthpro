@@ -14,6 +14,7 @@ import {
 import {
   decodeJwtPayload,
   recursiveQuotaWindows,
+  registryCatalogModels,
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
@@ -391,6 +392,7 @@ export function createCursorCatalogLoader({
   commandRunner = runCliCommand,
   apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
   fetchImpl = fetch,
+  registryLoader = null,
 } = {}) {
   // Catalog state is bucketed per browser account (by credential identity):
   // a single global cached/pending pair let concurrent multi-account loads
@@ -440,6 +442,40 @@ export function createCursorCatalogLoader({
     };
   }
 
+  /**
+   * pi-ai currently has no `cursor` provider. Matching only that id keeps this
+   * fallback from dumping Claude/GPT/Gemini rows into Cursor's menu (the
+   * native Cursor transport does not accept those slugs). When a future
+   * registry grows a Cursor route, the same loader starts publishing it.
+   */
+  async function registryModels() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      return [];
+    }
+    return registryCatalogModels(registry, (model) => model.provider === "cursor");
+  }
+
+  async function fallbackCatalog({ previous, error, desktop }) {
+    if (previous?.models?.length) return previous;
+    const models = await registryModels();
+    if (models.length > 0) {
+      return { models, source: "dsh_live_provider_registry" };
+    }
+    return {
+      models: [],
+      source: error?.code === "ENOENT"
+        ? (desktop ? "cursor_desktop_app" : "cursor_cli_not_found")
+        : "official_cursor_cli_status",
+      diagnostics: [desktop
+        ? "已检测到 Cursor 官方 OAuth；官方模型目录请求未返回结果"
+        : `无法读取 Cursor 官方模型目录：${error?.message ?? "unknown error"}`],
+    };
+  }
+
   return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
     const bucketKey = catalogBucketKey(accounts);
     const hasBrowserAccount = bucketKey !== "shared";
@@ -470,26 +506,26 @@ export function createCursorCatalogLoader({
         });
         const status = parseCursorAuthStatus(result.output);
         const models = status.models.map(normalizeModel).filter(Boolean);
-        const catalog = {
-          models,
-          source: "official_cursor_cli_status",
-          ...(models.length ? {} : { diagnostics: ["Cursor 官方 status 没有返回模型目录"] }),
-        };
-        if (models.length) cachedBuckets.set(bucketKey, catalog);
-        else cachedBuckets.delete(bucketKey);
+        if (models.length > 0) {
+          const catalog = { models, source: "official_cursor_cli_status" };
+          cachedBuckets.set(bucketKey, catalog);
+          return catalog;
+        }
+        const catalog = await fallbackCatalog({
+          previous: cached,
+          error: new Error("Cursor 官方 status 没有返回模型目录"),
+          desktop: readCursorDesktopSession({ env }),
+        });
+        if (catalog.models.length) cachedBuckets.set(bucketKey, catalog);
         return catalog;
       } catch (error) {
-        const desktop = readCursorDesktopSession({ env });
-        const catalog = {
-          models: [],
-          source: error?.code === "ENOENT"
-            ? (desktop ? "cursor_desktop_app" : "cursor_cli_not_found")
-            : "official_cursor_cli_status",
-          diagnostics: [desktop
-            ? "已检测到 Cursor 官方 OAuth；官方模型目录请求未返回结果"
-            : `无法读取 Cursor 官方模型目录：${error.message}`],
-        };
-        cachedBuckets.delete(bucketKey);
+        const catalog = await fallbackCatalog({
+          previous: cached,
+          error,
+          desktop: readCursorDesktopSession({ env }),
+        });
+        if (catalog.models.length) cachedBuckets.set(bucketKey, catalog);
+        else cachedBuckets.delete(bucketKey);
         return catalog;
       }
     })().finally(() => {
@@ -528,6 +564,7 @@ export class CursorSubscriptionDriver {
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
+    registryLoader = null,
     sessionReader = null,
     sessionSource = "official_cursor_client",
     sessionSourceKind = OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
@@ -561,6 +598,7 @@ export class CursorSubscriptionDriver {
       commandRunner,
       apiBaseUrl: this.apiBaseUrl,
       fetchImpl: this.fetchImpl,
+      registryLoader,
     });
     this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
       providerId: PROVIDER_ID,
