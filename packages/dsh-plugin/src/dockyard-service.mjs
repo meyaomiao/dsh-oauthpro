@@ -471,7 +471,7 @@ export class DockyardDshService {
   helpText() {
     const providers = (this.runtime.listProviderManifests?.() ?? []).map((manifest) => `${manifest.id} (${providerName(manifest)})`);
     return [
-      "Dockyard DSH 原生命令：",
+      "oauthpro 原生命令：",
       "/dockyard status                         查看账号、实时额度和刷新时间",
       "/dockyard scan [provider]                扫描本机官方登录态",
       "/dockyard add [provider] [candidateId]   添加扫描到的 OAuth 账号",
@@ -544,10 +544,10 @@ export class DockyardDshService {
 export function createDockyardCommand(service) {
   return {
     name: "dockyard",
-    description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
+    description: "Manage oauthpro providers, OAuth accounts, quotas, models, and account selection",
     input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
     handler: async ({ rawInput, signal }) => {
-      if (signal?.aborted) return commandError("Dockyard 命令已取消。");
+      if (signal?.aborted) return commandError("oauthpro 命令已取消。");
       const [verb = "help", ...args] = commandTokens(rawInput);
       try {
         switch (verb.toLowerCase()) {
@@ -555,7 +555,7 @@ export function createDockyardCommand(service) {
             return commandSuccess(service.helpText());
           case "status": {
             const snapshot = await service.snapshot();
-            const lines = ["Dockyard DSH 状态", `更新时间：${displayTime(snapshot.generatedAt)}`];
+            const lines = ["oauthpro 状态", `更新时间：${displayTime(snapshot.generatedAt)}`];
             for (const provider of snapshot.providers ?? []) {
               lines.push(`\n${providerName(provider.manifest)} [${provider.providerId}]`);
               lines.push(`策略：${provider.policy}；当前账号：${provider.defaultAccountId ?? "跟随策略"}`);
@@ -640,10 +640,10 @@ export function createDockyardCommand(service) {
             return commandSuccess(`OAuth 会话 ${result.sessionId}：${result.status}`);
           }
           default:
-            return commandError(`未知 Dockyard 子命令：${verb}\n\n${service.helpText()}`);
+            return commandError(`未知 oauthpro 子命令：${verb}\n\n${service.helpText()}`);
         }
       } catch (error) {
-        return commandError(`Dockyard 命令失败：${redactError(error)}`);
+        return commandError(`oauthpro 命令失败：${redactError(error)}`);
       }
     },
   };

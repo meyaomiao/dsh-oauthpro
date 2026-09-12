@@ -11,7 +11,7 @@
 ![node](https://img.shields.io/badge/node-%E2%89%A522-blue)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 
-*CI 在 ubuntu / windows / macos 三平台真机跑同一套 243 项测试,全绿才发版。*
+*CI 在 ubuntu / windows / macos 三平台真机跑同一套测试,全绿才发版。*
 
 </div>
 
@@ -23,15 +23,14 @@
 
 | 插件版本 | 状态 | 对应 DSH |
 |---|---|---|
-| **0.1.4**（当前 npm） | ✅ | **0.1.5-rc.1 / 0.1.5-rc.2**（及之后的 0.1.5 线） |
-| **main（#45 修复后）** | ✅ | 不再把 `@deepseek-ai/*` 当 `dependencies` 装进 profile，避免 hoist 旧 loader 把 DSH 启动树打挂 |
+| **0.1.5**（当前） | ✅ | **DSH 0.1.5 线**（peer：`@deepseek-ai/*` 由宿主提供，不再 hoist 进 profile） |
 
 ### 本次升级功能变化
 
-- **官方已有的交给官方**：不画赞踩、不画交付文件卡。本插件只做账户池 / 额度 chip。
-- 无功能移除。chip 在查不到额度时仍显示「订阅管理」入口，可点开再查。
-- 三个注入包（`dsh-api-remotes` / `dsh-client-ui-model-selection` / `dsh-client-ui-conversation`）在 0.1.5 上 API 与 0.1.2 核对为零 diff。
-- **0.1.5-rc.2 适配器契约补齐**（[#42](https://github.com/meyaomiao/dsh-oauthpro/issues/42)）：0.1.5-rc.2 起 token 计量每次都会调用适配器的 `imageRequestPricing`。本插件的 Dockyard 适配器是结构化对象、不继承上游 `LlmAdapter` 基类，缺这个方法会让计量抛 `TypeError`，表现为**自动压缩静默失效、`/compact` 报错**。现已补齐该方法并加上契约断言测试。
+- **Grok / Cursor / Antigravity 空目录兜底**：浏览器登录、没装官方 CLI 时仍能列出可调用模型，provider 不会从 `/model` 消失。
+- **依赖契约**：`@deepseek-ai/*` 改为 optional peer，避免 #45 那种装插件后 DSH 启动失败。
+- **面板品牌**：composer 弹窗 / 设置页 eyebrow 与命令帮助改为 oauthpro（内部路径与凭证 ref 不变）。
+- npm `description` 去掉 macOS-only，与三平台 README 对齐。
 
 ---
 

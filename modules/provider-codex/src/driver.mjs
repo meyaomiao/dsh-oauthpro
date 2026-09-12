@@ -313,7 +313,7 @@ export class CodexOAuthDriver {
       cliPath,
       loginArgs: ["login", "--device-auth"],
       environmentKey: "CODEX_HOME",
-      instructions: "已启动官方 Codex CLI OAuth 登录。请在官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Codex CLI OAuth 登录。请在官方网页完成登录，完成后回到 oauthpro。",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context),
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
@@ -323,7 +323,7 @@ export class CodexOAuthDriver {
         callbackPath: new URL(redirectUri).pathname,
         callbackHost: "localhost",
         callbackPort: browserCallbackPort,
-        instructions: "请在官方 Codex 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        instructions: "请在官方 Codex 授权页面选择账号并完成授权；完成后会自动返回 oauthpro。",
         authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
           const url = new URL(authorizationUrl);
           url.search = new URLSearchParams({
@@ -438,7 +438,7 @@ export class CodexOAuthDriver {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "已检测到 Codex 官方 OAuth 会话，当前账号已接入 Dockyard DSH。",
+        instructions: "已检测到 Codex 官方 OAuth 会话，当前账号已接入 oauthpro。",
         accounts,
         diagnostic: null,
       };
@@ -806,10 +806,10 @@ export function createCodexPiAiExecutor({
     baseUrl: DEFAULT_CODEX_BASE_URL,
     auth: {
       apiKey: {
-        name: "Dockyard DSH OAuth",
+        name: "oauthpro OAuth",
         resolve: ({ credential: supplied }) => ({
           auth: { apiKey: supplied?.key },
-          source: "Dockyard DSH OAuth",
+          source: "oauthpro OAuth",
         }),
       },
     },

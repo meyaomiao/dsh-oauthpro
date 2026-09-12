@@ -14704,9 +14704,9 @@ var DOCKYARD_LOCALES = Object.freeze({
     "nativePolicy.manual": "\u624B\u52A8\u9009\u62E9 Key",
     "nativePolicy.round_robin": "\u591A Key \u8F6E\u8BE2",
     "nativePolicy.failover": "\u5931\u8D25\u8F6C\u79FB",
-    "eyebrow.keyProvider": "DOCKYARD KEY PROVIDER",
-    "eyebrow.subscriptions": "DOCKYARD SUBSCRIPTIONS",
-    "eyebrow.subscription": "DOCKYARD SUBSCRIPTION",
+    "eyebrow.keyProvider": "OAUTHPRO KEY PROVIDER",
+    "eyebrow.subscriptions": "OAUTHPRO SUBSCRIPTIONS",
+    "eyebrow.subscription": "OAUTHPRO SUBSCRIPTION",
     "title.subscriptionManagement": "\u8BA2\u9605\u7BA1\u7406",
     "subtitle.subscriptionManagement": "\u9009\u62E9\u4E00\u4E2A\u5382\u5546\uFF0C\u8FDB\u5165\u767B\u5F55\u3001\u8D26\u53F7\u548C\u989D\u5EA6\u914D\u7F6E",
     "title.noModel": "\u672A\u9009\u62E9\u6A21\u578B",
@@ -14749,7 +14749,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "status.reentryScan": "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002",
     "error.unknown": "\u672A\u77E5\u9519\u8BEF",
     "ui.close": "\u5173\u95ED",
-    "error.remoteNotMounted": "Dockyard Remote \u5C1A\u672A\u6302\u8F7D\uFF1A{method}",
+    "error.remoteNotMounted": "oauthpro Remote \u5C1A\u672A\u6302\u8F7D\uFF1A{method}",
     "value.notReturned": "\u672A\u8FD4\u56DE",
     "value.unknown": "\u672A\u77E5",
     "value.quota": "\u989D\u5EA6",
@@ -14774,7 +14774,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "account.current": "\u5F53\u524D\u8D26\u53F7",
     "account.manualUse": "\u624B\u52A8\u4F7F\u7528",
     "account.remove": "\u79FB\u9664",
-    "account.confirmRemove": "\u786E\u8BA4\u79FB\u9664\u8D26\u53F7 {account}\uFF1F\u8FD9\u4F1A\u4ECE Dockyard DSH \u8D26\u53F7\u6C60\u548C\u672C\u673A Keychain \u5F15\u7528\u4E2D\u5220\u9664\u3002",
+    "account.confirmRemove": "\u786E\u8BA4\u79FB\u9664\u8D26\u53F7 {account}\uFF1F\u8FD9\u4F1A\u4ECE oauthpro \u8D26\u53F7\u6C60\u548C\u672C\u673A Keychain \u5F15\u7528\u4E2D\u5220\u9664\u3002",
     "quota.noWindow": "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3",
     "quota.openUsage": "\u6253\u5F00\u5B98\u65B9\u7528\u91CF\u9875\u9762",
     "quota.readFailed": "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25\uFF1A{error}",
@@ -14869,14 +14869,14 @@ var DOCKYARD_LOCALES = Object.freeze({
     "native.operation.readProviderCatalog": "\u8BFB\u53D6 provider \u76EE\u5F55",
     "native.operation.readProviderConfig": "\u8BFB\u53D6 provider \u914D\u7F6E",
     "native.operation.readKeyStatus": "\u8BFB\u53D6 Key \u72B6\u6001",
-    "native.operation.readKeyPool": "\u8BFB\u53D6 Dockyard Key \u6C60",
+    "native.operation.readKeyPool": "\u8BFB\u53D6 oauthpro Key \u6C60",
     "native.operation.refreshQuota": "\u5237\u65B0 provider \u5B9E\u65F6\u989D\u5EA6",
     "native.operation.updateProviderKey": "\u66F4\u65B0 provider Key \u914D\u7F6E",
     "native.operation.saveApiKey": "\u4FDD\u5B58 API Key",
-    "native.operation.registerKey": "\u767B\u8BB0 Dockyard Key",
+    "native.operation.registerKey": "\u767B\u8BB0 oauthpro Key",
     "native.operation.setManualKey": "\u5207\u6362\u4E3A\u624B\u52A8 Key",
     "native.operation.removeApiKey": "\u79FB\u9664 API Key",
-    "native.operation.removeDockyardKey": "\u79FB\u9664 Dockyard Key",
+    "native.operation.removeDockyardKey": "\u79FB\u9664 oauthpro Key",
     "native.operation.updatePolicy": "\u66F4\u65B0 Key \u7B56\u7565",
     "native.operation.resetUsage": "\u91CD\u7F6E Token \u7528\u91CF\u8BB0\u5F55",
     "usage.requests": "\u8BF7\u6C42",
@@ -14929,9 +14929,9 @@ var DOCKYARD_LOCALES = Object.freeze({
     "nativePolicy.manual": "Manual Key",
     "nativePolicy.round_robin": "Key round robin",
     "nativePolicy.failover": "Failover",
-    "eyebrow.keyProvider": "DOCKYARD KEY PROVIDER",
-    "eyebrow.subscriptions": "DOCKYARD SUBSCRIPTIONS",
-    "eyebrow.subscription": "DOCKYARD SUBSCRIPTION",
+    "eyebrow.keyProvider": "OAUTHPRO KEY PROVIDER",
+    "eyebrow.subscriptions": "OAUTHPRO SUBSCRIPTIONS",
+    "eyebrow.subscription": "OAUTHPRO SUBSCRIPTION",
     "title.subscriptionManagement": "Subscription management",
     "subtitle.subscriptionManagement": "Choose a provider to sign in and configure accounts and quotas",
     "title.noModel": "No model selected",
@@ -14974,7 +14974,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "status.reentryScan": "Sign in through the official client or environment, then scan local login state to connect it again.",
     "error.unknown": "Unknown error",
     "ui.close": "Close",
-    "error.remoteNotMounted": "Dockyard Remote is not mounted: {method}",
+    "error.remoteNotMounted": "oauthpro Remote is not mounted: {method}",
     "value.notReturned": "Not returned",
     "value.unknown": "Unknown",
     "value.quota": "Quota",
@@ -14999,7 +14999,7 @@ var DOCKYARD_LOCALES = Object.freeze({
     "account.current": "Current account",
     "account.manualUse": "Use manually",
     "account.remove": "Remove",
-    "account.confirmRemove": "Remove account {account}? This removes it from the Dockyard DSH account pool and its local Keychain reference.",
+    "account.confirmRemove": "Remove account {account}? This removes it from the oauthpro account pool and its local Keychain reference.",
     "quota.noWindow": "The provider has not returned a quota window",
     "quota.openUsage": "Open official usage page",
     "quota.readFailed": "Failed to read quota: {error}",
@@ -15094,14 +15094,14 @@ var DOCKYARD_LOCALES = Object.freeze({
     "native.operation.readProviderCatalog": "Read provider catalog",
     "native.operation.readProviderConfig": "Read provider configuration",
     "native.operation.readKeyStatus": "Read Key status",
-    "native.operation.readKeyPool": "Read Dockyard Key pool",
+    "native.operation.readKeyPool": "Read oauthpro Key pool",
     "native.operation.refreshQuota": "Refresh live provider quota",
     "native.operation.updateProviderKey": "Update provider Key configuration",
     "native.operation.saveApiKey": "Save API Key",
-    "native.operation.registerKey": "Register Dockyard Key",
+    "native.operation.registerKey": "Register oauthpro Key",
     "native.operation.setManualKey": "Switch to manual Key",
     "native.operation.removeApiKey": "Remove API Key",
-    "native.operation.removeDockyardKey": "Remove Dockyard Key",
+    "native.operation.removeDockyardKey": "Remove oauthpro Key",
     "native.operation.updatePolicy": "Update Key policy",
     "native.operation.resetUsage": "Reset token usage records",
     "usage.requests": "Requests",
@@ -15386,7 +15386,7 @@ var NativeKeyPoolController = class {
       const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
       try {
-        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read Dockyard Key pool"));
+        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read oauthpro Key pool"));
       } catch {
       }
       if (generation !== this.generation) return null;
@@ -15468,7 +15468,7 @@ var NativeKeyPoolController = class {
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       }];
       writeMetadata(providerId, metadata);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register oauthpro Key"));
       await this.load(providerId);
       this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
@@ -15491,7 +15491,7 @@ var NativeKeyPoolController = class {
       if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
       if (!key.configured) throw new Error(this.t?.("native.error.keyNotConfigured") ?? "This Key is not configured in DSH Credentials");
       await this.mutateProfile(providerId, ref);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register oauthpro Key"));
       await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, this.operation("native.operation.setManualKey", "Switch to manual Key"));
       const metadata = readMetadata(providerId);
       metadata.policy = "manual";
@@ -15523,7 +15523,7 @@ var NativeKeyPoolController = class {
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
       try {
-        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove Dockyard Key"));
+        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove oauthpro Key"));
       } catch {
       }
       await this.load(providerId);

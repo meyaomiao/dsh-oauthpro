@@ -78,7 +78,7 @@ export function createCliOAuthAuthorizer({
   authFileName = "auth.json",
   environment = process.env,
   profilePrefix = `dockyard-${providerId ?? "provider"}-oauth-`,
-  instructions = "请在官方授权页面完成登录，完成后回到 Dockyard DSH。",
+  instructions = "请在官方授权页面完成登录，完成后回到 oauthpro。",
   timeoutMs = DEFAULT_TIMEOUT_MS,
   importCredentials,
   profileDirectory = null,

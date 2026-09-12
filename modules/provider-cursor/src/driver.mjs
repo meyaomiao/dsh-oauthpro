@@ -617,7 +617,7 @@ export class CursorSubscriptionDriver {
     this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
       providerId: PROVIDER_ID,
       source: sessionSource,
-      instructions: "请在 Cursor 官方客户端完成登录，完成后回到 Dockyard DSH。",
+      instructions: "请在 Cursor 官方客户端完成登录，完成后回到 oauthpro。",
       readSession: async (context = {}) => {
         const status = this.sessionReader
           ? await this.#readStatus(context.signal)
@@ -639,7 +639,7 @@ export class CursorSubscriptionDriver {
       loginArgs: ["login"],
       environment: env,
       browserOpened: true,
-      instructions: "已启动官方 Cursor CLI OAuth 登录。请在 Cursor 官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Cursor CLI OAuth 登录。请在 Cursor 官方网页完成登录，完成后回到 oauthpro。",
       importStatus: async (context) => {
         const status = await this.#readStatus();
         if (!status.loggedIn) return [];
@@ -652,7 +652,7 @@ export class CursorSubscriptionDriver {
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
       ? createBrowserOAuthAuthorizer({
         providerId: PROVIDER_ID,
-        instructions: "请在官方 Cursor 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        instructions: "请在官方 Cursor 授权页面选择账号并完成授权；完成后会自动返回 oauthpro。",
         authorizationUrlBuilder: async () => {
           const verifier = randomBytes(32).toString("base64url");
           const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -905,7 +905,7 @@ export class CursorSubscriptionDriver {
       return {
         status: "completed",
         providerId: PROVIDER_ID,
-        instructions: "已检测到 Cursor 官方会话，当前账号已接入 Dockyard DSH。",
+        instructions: "已检测到 Cursor 官方会话，当前账号已接入 oauthpro。",
         accounts: [account],
         diagnostic: null,
       };
