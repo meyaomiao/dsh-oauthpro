@@ -701,6 +701,49 @@ function isLoopbackHostname(hostname) {
   const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
   return LOOPBACK_HOSTNAMES.has(bare);
 }
+function reasoningFromThinkingLevelMap(thinkingLevelMap) {
+  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return void 0;
+  const efforts = Object.entries(thinkingLevelMap).filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0).map(([id, providerValue]) => ({
+    id,
+    name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+    ...providerValue === id ? {} : { description: `provider value: ${providerValue}` }
+  }));
+  return efforts.length > 0 ? { efforts } : void 0;
+}
+function registryCatalogModel(model) {
+  if (!model || typeof model.id !== "string" || model.id.length === 0) return null;
+  const reasoning = reasoningFromThinkingLevelMap(model.thinkingLevelMap) ?? (model.reasoning && typeof model.reasoning === "object" ? model.reasoning : void 0);
+  return {
+    id: model.id,
+    name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
+    ...Array.isArray(model.input) && model.input.length > 0 ? { inputModalities: [...model.input] } : {},
+    ...Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {},
+    ...Number.isInteger(model.maxTokens) ? { maxTokens: model.maxTokens } : {},
+    ...reasoning ? { reasoning } : {}
+  };
+}
+function registryCatalogModels(models, match) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const raw of Array.isArray(models) ? models : []) {
+    if (!raw || typeof match === "function" && !match(raw)) continue;
+    const model = registryCatalogModel(raw);
+    if (!model) continue;
+    const previous = byId.get(model.id);
+    if (!previous) {
+      byId.set(model.id, model);
+      continue;
+    }
+    byId.set(model.id, {
+      ...previous,
+      ...previous.name === model.id && model.name !== model.id ? { name: model.name } : {},
+      ...previous.inputModalities === void 0 && model.inputModalities !== void 0 ? { inputModalities: [...model.inputModalities] } : {},
+      ...previous.contextWindow === void 0 && model.contextWindow !== void 0 ? { contextWindow: model.contextWindow } : {},
+      ...previous.maxTokens === void 0 && model.maxTokens !== void 0 ? { maxTokens: model.maxTokens } : {},
+      ...previous.reasoning === void 0 && model.reasoning !== void 0 ? { reasoning: model.reasoning } : {}
+    });
+  }
+  return [...byId.values()];
+}
 function assertSecureEndpointUrl(value, label = "endpoint") {
   const raw = String(value ?? "").trim();
   let url;
@@ -7083,7 +7126,8 @@ function createGrokCatalogLoader({
   commandRunner = null,
   timeoutMs = 3e4,
   readJson: readJson3 = readJsonFile,
-  cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS2
+  cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS2,
+  registryLoader = null
 } = {}) {
   const resolvedHome = grokHomePath({ env, home, grokHome });
   let cached = null;
@@ -7113,6 +7157,16 @@ function createGrokCatalogLoader({
     });
     return pendingRefresh;
   }
+  async function registryModels2() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      return [];
+    }
+    return registryCatalogModels(registry, (model) => model.provider === "xai");
+  }
   return async function loadCatalog({ force = false } = {}) {
     const now = Date.now();
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
@@ -7129,7 +7183,9 @@ function createGrokCatalogLoader({
         void refreshLive(cache);
         return cached;
       }
-      let value;
+      let models = localModels;
+      let source = localModels.length > 0 ? "official_grok_local_cache" : "official_grok_cli";
+      let diagnostics = [];
       if (typeof commandRunner === "function") {
         try {
           const result = await commandRunner(cliPath, ["models"], {
@@ -7137,26 +7193,34 @@ function createGrokCatalogLoader({
             timeoutMs,
             providerId: PROVIDER_ID4
           });
-          const models = parseGrokModelCatalog(result.output, cache);
-          value = {
-            models,
-            source: "official_grok_cli",
-            ...models.length ? {} : { diagnostics: ["Grok \u5B98\u65B9 CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u6A21\u578B"] }
-          };
+          const liveModels = parseGrokModelCatalog(result.output, cache);
+          if (liveModels.length > 0) {
+            models = liveModels;
+            source = "official_grok_cli";
+          } else if (models.length === 0) {
+            diagnostics = ["Grok \u5B98\u65B9 CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u6A21\u578B"];
+          }
         } catch (error) {
-          value = {
-            models: parseGrokModelCatalog("", cache),
-            source: cache ? "official_grok_local_cache" : "official_grok_cli",
-            diagnostics: [`Grok \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`]
-          };
+          if (models.length === 0) {
+            diagnostics = [`Grok \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`];
+          }
         }
-      } else {
-        value = {
-          models: parseGrokModelCatalog("", cache),
-          source: "official_grok_local_cache",
-          ...cache ? {} : { diagnostics: [`\u672A\u627E\u5230 Grok \u5B9E\u65F6\u6A21\u578B\u7F13\u5B58\uFF1A${join7(resolvedHome, "models_cache.json")}`] }
-        };
+      } else if (models.length === 0) {
+        diagnostics = [`\u672A\u627E\u5230 Grok \u5B9E\u65F6\u6A21\u578B\u7F13\u5B58\uFF1A${join7(resolvedHome, "models_cache.json")}`];
       }
+      if (models.length === 0) {
+        const registryValues = await registryModels2();
+        if (registryValues.length > 0) {
+          models = registryValues;
+          source = "dsh_live_provider_registry";
+          diagnostics = [];
+        }
+      }
+      const value = {
+        models,
+        source,
+        ...diagnostics.length > 0 ? { diagnostics } : {}
+      };
       cached = value;
       cachedAt = Date.now();
       return value;
@@ -7174,6 +7238,7 @@ var GrokOAuthDriver = class {
     home = homedir5(),
     grokHome,
     catalogLoader = null,
+    registryLoader = null,
     oauthAuthorizer = null,
     browserAuthorizer = null,
     browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
@@ -7211,7 +7276,8 @@ var GrokOAuthDriver = class {
       grokHome: this.grokHome,
       cliPath,
       commandRunner,
-      timeoutMs
+      timeoutMs,
+      registryLoader
     });
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID4,
@@ -11848,7 +11914,7 @@ function createPiAiModelRegistryLoader({ moduleAnchor = null } = {}) {
     return registryPromise;
   };
 }
-function reasoningFromThinkingLevelMap(thinkingLevelMap) {
+function reasoningFromThinkingLevelMap2(thinkingLevelMap) {
   if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return void 0;
   const efforts = Object.entries(thinkingLevelMap).filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0).map(([id, providerValue]) => ({
     id,
@@ -11858,7 +11924,7 @@ function reasoningFromThinkingLevelMap(thinkingLevelMap) {
   return efforts.length > 0 ? { efforts } : void 0;
 }
 function codexModelToDshCatalog(model) {
-  const reasoning = reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
+  const reasoning = reasoningFromThinkingLevelMap2(model?.thinkingLevelMap);
   return {
     id: model.id,
     name: model.name,
@@ -13752,7 +13818,8 @@ function apply(ctx, config = {}) {
       antigravity: antigravityCatalogLoader,
       grok: runtimeOptions.catalogLoaders?.grok ?? createGrokCatalogLoader({
         ...runtimeOptions.grok ?? {},
-        commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand
+        commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand,
+        registryLoader: modelRegistryLoader
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {})

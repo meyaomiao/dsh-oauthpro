@@ -85,6 +85,7 @@ export function apply(ctx, config = {}) {
       grok: runtimeOptions.catalogLoaders?.grok ?? createGrokCatalogLoader({
         ...(runtimeOptions.grok ?? {}),
         commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand,
+        registryLoader: modelRegistryLoader,
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
