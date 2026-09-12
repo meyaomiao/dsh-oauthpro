@@ -1596,6 +1596,123 @@ test("Grok catalog loader returns persisted models before a slow CLI refresh", a
   releaseRefresh();
 });
 
+test("Grok catalog loader falls back to the DSH registry when the official CLI is unavailable", async () => {
+  const cliCalls = [];
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => null,
+    commandRunner: async (command, args) => {
+      cliCalls.push([command, args]);
+      const error = new Error("spawn grok ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+    registryLoader: async () => [
+      {
+        id: "grok-4.5",
+        name: "Grok 4.5",
+        api: "openai-responses",
+        provider: "xai",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 500_000,
+        maxTokens: 30_000,
+        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high" },
+      },
+      { id: "unrelated", provider: "other" },
+    ],
+  });
+  // The browser-OAuth-only install never has a model cache and never has the
+  // official CLI; the provider must still publish a selectable catalog.
+  assert.deepEqual(await loader(), {
+    models: [{
+      id: "grok-4.5",
+      name: "Grok 4.5",
+      inputModalities: ["text", "image"],
+      contextWindow: 500_000,
+      maxTokens: 30_000,
+      reasoning: {
+        efforts: [
+          { id: "low", name: "Low" },
+          { id: "medium", name: "Medium" },
+          { id: "high", name: "High" },
+        ],
+      },
+    }],
+    source: "dsh_live_provider_registry",
+  });
+  assert.deepEqual(cliCalls, [["grok", ["models"]]]);
+});
+
+test("Grok catalog loader keeps the CLI diagnostic when no source yields models", async () => {
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => null,
+    commandRunner: async () => {
+      const error = new Error("spawn grok ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+    registryLoader: async () => [{ id: "unrelated", provider: "other" }],
+  });
+  const result = await loader();
+  assert.deepEqual(result.models, []);
+  assert.equal(result.source, "official_grok_cli");
+  assert.deepEqual(result.diagnostics, ["Grok 官方模型目录读取失败：spawn grok ENOENT"]);
+});
+
+test("Grok catalog loader prefers live CLI models over the registry", async () => {
+  let registryCalls = 0;
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => null,
+    commandRunner: async () => ({ output: "Available models:\n  * grok-4.6 (default)\n  - grok-4.7\n" }),
+    registryLoader: async () => {
+      registryCalls += 1;
+      return [{ id: "grok-4.5", name: "Grok 4.5", provider: "xai" }];
+    },
+  });
+  const result = await loader();
+  assert.deepEqual(result.models, [
+    { id: "grok-4.6", name: "grok-4.6" },
+    { id: "grok-4.7", name: "grok-4.7" },
+  ]);
+  assert.equal(result.source, "official_grok_cli");
+  assert.equal(result.diagnostics, undefined);
+  assert.equal(registryCalls, 0);
+});
+
+test("Grok catalog loader survives a failing registry loader", async () => {
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => null,
+    commandRunner: async () => {
+      throw new Error("spawn grok ENOENT");
+    },
+    registryLoader: async () => {
+      throw new Error("registry unavailable");
+    },
+  });
+  const result = await loader();
+  assert.deepEqual(result.models, []);
+  assert.deepEqual(result.diagnostics, ["Grok 官方模型目录读取失败：spawn grok ENOENT"]);
+});
+
+test("Grok catalog loader never reports a failed read while persisted models exist", async () => {
+  const loader = createGrokCatalogLoader({
+    grokHome: "/provider/grok",
+    readJson: async () => ({ models: { "grok-live": { info: { model: "grok-live", name: "Grok Live" } } } }),
+    commandRunner: async () => {
+      throw new Error("spawn grok ENOENT");
+    },
+    registryLoader: async () => [{ id: "grok-4.5", provider: "xai" }],
+  });
+  const result = await loader({ force: true });
+  assert.deepEqual(result.models, [{ id: "grok-live", name: "Grok Live" }]);
+  assert.equal(result.source, "official_grok_local_cache");
+  assert.equal(result.diagnostics, undefined);
+});
+
 test("Claude subscription status rejects API keys and maps live registry metadata", async () => {
   const apiKey = parseClaudeAuthStatus(JSON.stringify({
     loggedIn: true,

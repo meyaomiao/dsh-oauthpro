@@ -169,6 +169,82 @@ export function isLoopbackHostname(hostname) {
  *
  * Returns the normalized URL string; throws on violations.
  */
+/**
+ * Map a pi-ai `thinkingLevelMap` onto the DSH reasoning contract. Levels whose
+ * provider value is absent (null/empty) are not selectable upstream and stay
+ * out; a level whose provider value differs from its id carries that value as
+ * a description so the UI can explain the wire format.
+ */
+export function reasoningFromThinkingLevelMap(thinkingLevelMap) {
+  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return undefined;
+  const efforts = Object.entries(thinkingLevelMap)
+    .filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0)
+    .map(([id, providerValue]) => ({
+      id,
+      name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+      ...(providerValue === id ? {} : { description: `provider value: ${providerValue}` }),
+    }));
+  return efforts.length > 0 ? { efforts } : undefined;
+}
+
+/**
+ * Convert one DSH pi-ai built-in registry entry into the provider-neutral
+ * catalog shape provider modules publish. Every registry-backed provider
+ * (Claude, Grok, …) must expose identical metadata, so the mapping lives here
+ * instead of being re-implemented per provider module.
+ *
+ * Returns `null` for entries without a usable id.
+ */
+export function registryCatalogModel(model) {
+  if (!model || typeof model.id !== "string" || model.id.length === 0) return null;
+  const reasoning = reasoningFromThinkingLevelMap(model.thinkingLevelMap)
+    ?? (model.reasoning && typeof model.reasoning === "object" ? model.reasoning : undefined);
+  return {
+    id: model.id,
+    name: typeof model.name === "string" && model.name.length > 0 ? model.name : model.id,
+    ...(Array.isArray(model.input) && model.input.length > 0 ? { inputModalities: [...model.input] } : {}),
+    ...(Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+    ...(Number.isInteger(model.maxTokens) ? { maxTokens: model.maxTokens } : {}),
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+/**
+ * Select and de-duplicate registry entries matching `match`, merging metadata
+ * when the installed registry exposes one id through more than one API entry.
+ * A model id keeps a single DSH row while richer fields from the duplicate win.
+ */
+export function registryCatalogModels(models, match) {
+  const byId = new Map();
+  for (const raw of (Array.isArray(models) ? models : [])) {
+    if (!raw || (typeof match === "function" && !match(raw))) continue;
+    const model = registryCatalogModel(raw);
+    if (!model) continue;
+    const previous = byId.get(model.id);
+    if (!previous) {
+      byId.set(model.id, model);
+      continue;
+    }
+    byId.set(model.id, {
+      ...previous,
+      ...(previous.name === model.id && model.name !== model.id ? { name: model.name } : {}),
+      ...(previous.inputModalities === undefined && model.inputModalities !== undefined
+        ? { inputModalities: [...model.inputModalities] }
+        : {}),
+      ...(previous.contextWindow === undefined && model.contextWindow !== undefined
+        ? { contextWindow: model.contextWindow }
+        : {}),
+      ...(previous.maxTokens === undefined && model.maxTokens !== undefined
+        ? { maxTokens: model.maxTokens }
+        : {}),
+      ...(previous.reasoning === undefined && model.reasoning !== undefined
+        ? { reasoning: model.reasoning }
+        : {}),
+    });
+  }
+  return [...byId.values()];
+}
+
 export function assertSecureEndpointUrl(value, label = "endpoint") {
   const raw = String(value ?? "").trim();
   let url;

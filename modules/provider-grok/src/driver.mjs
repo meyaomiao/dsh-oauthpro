@@ -22,6 +22,7 @@ import {
   finiteNumber,
   isoFromEpoch,
   readJsonFile,
+  registryCatalogModels,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import { OFFICIAL_SESSION_SOURCE_KINDS } from "../../../packages/providers/src/session-source.mjs";
@@ -340,6 +341,7 @@ export function createGrokCatalogLoader({
   timeoutMs = 30_000,
   readJson = readJsonFile,
   cacheTtlMs = Number(process.env.DOCKYARD_GROK_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
+  registryLoader = null,
 } = {}) {
   const resolvedHome = grokHomePath({ env, home, grokHome });
   let cached = null;
@@ -373,6 +375,27 @@ export function createGrokCatalogLoader({
     return pendingRefresh;
   }
 
+  /**
+   * The official Grok CLI is the authoritative catalog, but a subscription
+   * account can be added through this plugin's browser OAuth alone — no CLI,
+   * hence no `~/.grok/models_cache.json` on the machine. That state must still
+   * publish a selectable model list (the empty-catalog alternative is a
+   * provider that silently disappears from DSH's model menu), so fall back to
+   * the DSH pi-ai registry, exactly like the Claude module does.
+   */
+  async function registryModels() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      // The registry is an optional fallback source; a broken registry must
+      // never fail the provider catalog it is meant to back up.
+      return [];
+    }
+    return registryCatalogModels(registry, (model) => model.provider === "xai");
+  }
+
   return async function loadCatalog({ force = false } = {}) {
     const now = Date.now();
     if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
@@ -389,7 +412,12 @@ export function createGrokCatalogLoader({
         void refreshLive(cache);
         return cached;
       }
-      let value;
+      // Precedence: local official cache, then the live official CLI, then the
+      // DSH registry. Diagnostics are only reported when the catalog is empty,
+      // so a usable list is never announced as a failed read.
+      let models = localModels;
+      let source = localModels.length > 0 ? "official_grok_local_cache" : "official_grok_cli";
+      let diagnostics = [];
       if (typeof commandRunner === "function") {
         try {
           const result = await commandRunner(cliPath, ["models"], {
@@ -397,26 +425,34 @@ export function createGrokCatalogLoader({
             timeoutMs,
             providerId: PROVIDER_ID,
           });
-          const models = parseGrokModelCatalog(result.output, cache);
-          value = {
-            models,
-            source: "official_grok_cli",
-            ...(models.length ? {} : { diagnostics: ["Grok 官方 CLI 没有返回可用模型"] }),
-          };
+          const liveModels = parseGrokModelCatalog(result.output, cache);
+          if (liveModels.length > 0) {
+            models = liveModels;
+            source = "official_grok_cli";
+          } else if (models.length === 0) {
+            diagnostics = ["Grok 官方 CLI 没有返回可用模型"];
+          }
         } catch (error) {
-          value = {
-            models: parseGrokModelCatalog("", cache),
-            source: cache ? "official_grok_local_cache" : "official_grok_cli",
-            diagnostics: [`Grok 官方模型目录读取失败：${error.message}`],
-          };
+          if (models.length === 0) {
+            diagnostics = [`Grok 官方模型目录读取失败：${error.message}`];
+          }
         }
-      } else {
-        value = {
-          models: parseGrokModelCatalog("", cache),
-          source: "official_grok_local_cache",
-          ...(cache ? {} : { diagnostics: [`未找到 Grok 实时模型缓存：${join(resolvedHome, "models_cache.json")}`] }),
-        };
+      } else if (models.length === 0) {
+        diagnostics = [`未找到 Grok 实时模型缓存：${join(resolvedHome, "models_cache.json")}`];
       }
+      if (models.length === 0) {
+        const registryValues = await registryModels();
+        if (registryValues.length > 0) {
+          models = registryValues;
+          source = "dsh_live_provider_registry";
+          diagnostics = [];
+        }
+      }
+      const value = {
+        models,
+        source,
+        ...(diagnostics.length > 0 ? { diagnostics } : {}),
+      };
       cached = value;
       cachedAt = Date.now();
       return value;
@@ -546,6 +582,7 @@ export class GrokOAuthDriver {
     home = homedir(),
     grokHome,
     catalogLoader = null,
+    registryLoader = null,
     oauthAuthorizer = null,
     browserAuthorizer = null,
     browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
@@ -586,6 +623,7 @@ export class GrokOAuthDriver {
       cliPath,
       commandRunner,
       timeoutMs,
+      registryLoader,
     });
     this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,

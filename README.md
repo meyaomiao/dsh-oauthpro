@@ -55,7 +55,7 @@
   - **z.ai / 智谱 GLM Coding Plan** → `GET /api/monitor/usage/quota/limit`:5 小时 + 月度两个 credits 窗口、使用百分比、重置时间、套餐名
   - 自定义 provider 按以上三族自动探测;都不兼容则给出明确探测诊断,绝不显示假百分比
 - **OAuth 账户池**:Codex / Claude / Cursor / Grok / Antigravity 等订阅制 provider 的浏览器授权流(PKCE + state 校验),授权页**三平台自动打开**(macOS `open` / Windows `cmd /c start` / Linux `xdg-open`),loopback 与 manual-code 双回调
-- **实时模型目录**:OAuth provider 接官方实时目录(如 Codex 的 gpt-5.6 系列),合并本地注册表,官网上新模型即刻可见
+- **实时模型目录**:OAuth provider 接官方实时目录(如 Codex 的 gpt-5.6 系列),合并本地注册表,官网上新模型即刻可见;官方 CLI / 本地缓存都拿不到目录时(如只在本插件里用浏览器授权登录 Grok、机器上没装官方 CLI),自动回退 DSH 内置 pi-ai 注册表,provider 不会因为目录为空而在模型菜单里消失
 - **上下文上限覆写**:官方/注册表值缺失时可自定义,只影响 DSH 实际发送的上下文
 - **composer chip**:额度优先、Key 数量兜底,点击弹窗、悬停见模型名
 - **token 台账**:按 provider/account 维度持久化请求与 token 计数,「清空全部用量」一键重置
