@@ -11872,9 +11872,9 @@ async function importFromDshInstall(moduleAnchor) {
 async function loadExecutor(moduleAnchor) {
   let dependencies;
   try {
-    dependencies = await importBareDependencies();
-  } catch {
     dependencies = await importFromDshInstall(moduleAnchor);
+  } catch {
+    dependencies = await importBareDependencies();
   }
   const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = dependencies;
   const models = openaiCodexProvider().getModels();
@@ -11892,9 +11892,9 @@ async function loadExecutor(moduleAnchor) {
 }
 async function loadDependencies(moduleAnchor) {
   try {
-    return await importBareDependencies();
+    return await importFromDshInstall(moduleAnchor);
   } catch {
-    return importFromDshInstall(moduleAnchor);
+    return importBareDependencies();
   }
 }
 function createCodexDshRequestExecutor({ moduleAnchor = null } = {}) {
