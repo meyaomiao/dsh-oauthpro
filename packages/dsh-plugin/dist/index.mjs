@@ -10229,6 +10229,13 @@ var cursorNativeTransportConstants = Object.freeze({
 // modules/provider-cursor/src/driver.mjs
 var PROVIDER_ID9 = "cursor";
 var CREDENTIAL_SLOT5 = Symbol("dockyard-cursor-session");
+var BUILTIN_CURSOR_CATALOG = Object.freeze([
+  Object.freeze({ id: "default", name: "Auto" }),
+  Object.freeze({ id: "claude-4.5-sonnet", name: "Claude 4.5 Sonnet", contextWindow: 2e5 }),
+  Object.freeze({ id: "claude-4-sonnet", name: "Claude 4 Sonnet", contextWindow: 2e5 }),
+  Object.freeze({ id: "gpt-5", name: "GPT-5" }),
+  Object.freeze({ id: "gpt-5-mini", name: "GPT-5 Mini" })
+]);
 function hash5(value) {
   return createHash9("sha256").update(String(value)).digest("hex");
 }
@@ -10601,16 +10608,15 @@ function createCursorCatalogLoader({
     }
     return registryCatalogModels(registry, (model) => model.provider === "cursor");
   }
-  async function fallbackCatalog({ previous, error, desktop }) {
+  async function fallbackCatalog({ previous }) {
     if (previous?.models?.length) return previous;
     const models = await registryModels2();
     if (models.length > 0) {
       return { models, source: "dsh_live_provider_registry" };
     }
     return {
-      models: [],
-      source: error?.code === "ENOENT" ? desktop ? "cursor_desktop_app" : "cursor_cli_not_found" : "official_cursor_cli_status",
-      diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9 OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u672A\u8FD4\u56DE\u7ED3\u679C" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error?.message ?? "unknown error"}`]
+      models: BUILTIN_CURSOR_CATALOG.map((model) => ({ ...model })),
+      source: "oauthpro_builtin_cursor_catalog"
     };
   }
   return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
