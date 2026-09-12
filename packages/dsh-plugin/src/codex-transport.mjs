@@ -103,12 +103,12 @@ async function importFromDshInstall(moduleAnchor) {
 async function loadExecutor(moduleAnchor) {
   let dependencies;
   try {
-    dependencies = await importBareDependencies();
-  } catch {
-    // A local DSH plugin is commonly linked into the profile, so its source
-    // file is outside the profile node_modules tree. Resolve the same
-    // dependencies from the DSH executable's installation in that case.
     dependencies = await importFromDshInstall(moduleAnchor);
+  } catch {
+    // Only a plugin tree that carries the whole DSH trio itself should fall
+    // back to bare resolution; see loadDependencies() for why the installation
+    // that owns `@deepseek-ai/dsh-llm-pi-ai` is the preferred source.
+    dependencies = await importBareDependencies();
   }
   const { PiAiAdapter, createProvider, openAICodexResponsesApi, openaiCodexProvider } = dependencies;
   const models = openaiCodexProvider().getModels();
@@ -125,11 +125,25 @@ async function loadExecutor(moduleAnchor) {
   });
 }
 
+/**
+ * Resolve DSH's pi-ai dependencies from the installation that owns
+ * `@deepseek-ai/dsh-llm-pi-ai` (this file's own tree, a linked local checkout,
+ * or the DSH executable) instead of importing every package by bare name.
+ *
+ * The adapter and the pi-ai runtime must come from ONE installation. A profile
+ * install can hoist `@deepseek-ai/dsh-llm-pi-ai` to a shared level while this
+ * plugin's own `@earendil-works/pi-ai` dependency stays at a different version;
+ * resolving each by bare name from this module's location silently mixes them —
+ * observed as DSH 0.1.5's adapter paired with pi-ai 0.82, whose built-in `xai`
+ * registry stops at grok-4.5 and therefore hides grok-4.6. Install-consistent
+ * resolution is tried first; bare resolution remains the fallback for a tree
+ * that carries both packages itself.
+ */
 async function loadDependencies(moduleAnchor) {
   try {
-    return await importBareDependencies();
+    return await importFromDshInstall(moduleAnchor);
   } catch {
-    return importFromDshInstall(moduleAnchor);
+    return importBareDependencies();
   }
 }
 
