@@ -1043,6 +1043,65 @@ test("Antigravity catalog stays mounted when the optional CLI is unavailable", a
   assert.equal(calls, 1);
 });
 
+test("Antigravity catalog loader falls back to the DSH registry when the official CLI is unavailable", async () => {
+  const loader = createAntigravityCatalogLoader({
+    cacheFilePath: null,
+    commandRunner: async () => {
+      const error = new Error("spawn agy ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+    registryLoader: async () => [
+      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "google", contextWindow: 1_048_576, maxTokens: 65_536, input: ["text", "image"] },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "google-vertex" },
+      { id: "unrelated", provider: "xai" },
+    ],
+  });
+  const catalog = await loader();
+  assert.equal(catalog.source, "dsh_live_provider_registry");
+  assert.equal(catalog.diagnostics, undefined);
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gemini-2.5-flash", "gemini-2.5-pro"]);
+  assert.equal(catalog.models[0].contextWindow, 1_048_576);
+});
+
+test("Antigravity catalog loader prefers live CLI models over the registry", async () => {
+  let registryCalls = 0;
+  const loader = createAntigravityCatalogLoader({
+    cacheFilePath: null,
+    commandRunner: async () => ({ output: "gemini-live\tGemini Live\n" }),
+    registryLoader: async () => {
+      registryCalls += 1;
+      return [{ id: "gemini-2.5-flash", provider: "google" }];
+    },
+  });
+  const catalog = await loader({ force: true });
+  assert.deepEqual(catalog.models.map((model) => model.id), ["gemini-live"]);
+  assert.equal(catalog.source, "official_antigravity_cli");
+  assert.equal(catalog.diagnostics, undefined);
+  assert.equal(registryCalls, 1);
+});
+
+test("Antigravity catalog loader never reports a failed read while a previous catalog exists", async () => {
+  let calls = 0;
+  const loader = createAntigravityCatalogLoader({
+    cacheFilePath: null,
+    cacheTtlMs: 1,
+    commandRunner: async () => {
+      calls += 1;
+      if (calls === 1) return { output: "gemini-live\tGemini Live\n" };
+      const error = new Error("spawn agy ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+  });
+  const first = await loader({ force: true });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = await loader({ force: true });
+  assert.deepEqual(first.models.map((model) => model.id), ["gemini-live"]);
+  assert.deepEqual(second.models.map((model) => model.id), ["gemini-live"]);
+  assert.equal(second.diagnostics, undefined);
+});
+
 test("provider model metadata exposes only returned reasoning tiers", () => {
   assert.deepEqual(parseAntigravityModelCatalog([
     "Fetching available models...",
@@ -2493,6 +2552,68 @@ test("Cursor browser OAuth loads the official account model catalog without the 
   assert.equal(request.url, "https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels");
   assert.equal(request.init.headers.authorization, "Bearer cursor-access");
   assert.equal(JSON.parse(request.init.body).useReactModelPicker, true);
+});
+
+test("Cursor catalog loader falls back to a Cursor registry row when RPC and CLI are unavailable", async () => {
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      const error = new Error("spawn cursor-agent ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+    fetchImpl: async () => { throw new Error("RPC must not be required without a browser account"); },
+    registryLoader: async () => [
+      { id: "cursor-live", name: "Cursor Live", provider: "cursor", contextWindow: 128_000 },
+      { id: "claude-haiku-4-5", provider: "anthropic" },
+      { id: "gemini-2.5-flash", provider: "google" },
+    ],
+  });
+  const catalog = await loader();
+  assert.equal(catalog.source, "dsh_live_provider_registry");
+  assert.equal(catalog.diagnostics, undefined);
+  assert.deepEqual(catalog.models, [{ id: "cursor-live", name: "Cursor Live", contextWindow: 128_000 }]);
+});
+
+test("Cursor catalog loader does not dump Claude or Gemini rows as a Cursor menu", async () => {
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      const error = new Error("spawn cursor-agent ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+    registryLoader: async () => [
+      { id: "claude-haiku-4-5", provider: "anthropic" },
+      { id: "gpt-4o", provider: "openai" },
+      { id: "gemini-2.5-flash", provider: "google" },
+    ],
+  });
+  const catalog = await loader();
+  assert.deepEqual(catalog.models, []);
+  assert.match(catalog.diagnostics[0], /spawn cursor-agent ENOENT/);
+});
+
+test("Cursor catalog loader keeps the last live catalog when a later CLI read fails", async () => {
+  let calls = 0;
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          output: JSON.stringify({ loggedIn: true, models: [{ id: "cursor-live", name: "Cursor Live" }] }),
+          errorOutput: "",
+        };
+      }
+      const error = new Error("spawn cursor-agent ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+  });
+  const first = await loader();
+  const second = await loader({ force: true });
+  assert.deepEqual(first.models, [{ id: "cursor-live", name: "Cursor Live" }]);
+  assert.deepEqual(second.models, [{ id: "cursor-live", name: "Cursor Live" }]);
+  assert.equal(second.diagnostics, undefined);
+  assert.equal(calls, 2);
 });
 
 test("Cursor official CLI executor passes the selected model and normalizes stream-json", async () => {

@@ -18,6 +18,7 @@ import {
   isoFromEpoch,
   recursiveQuotaWindows,
   redactError,
+  registryCatalogModels,
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
@@ -640,6 +641,22 @@ export function createAntigravityCatalogLoader({
     return persistWrite;
   };
 
+  async function registryFallbackModels() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      // The registry is an optional fallback source; a broken registry must
+      // never fail the provider catalog it is meant to back up.
+      return [];
+    }
+    return registryCatalogModels(
+      registry,
+      (model) => model.provider === "google" || model.provider === "google-vertex",
+    );
+  }
+
   const refresh = (scope) => {
     if (pending.has(scope)) return pending.get(scope);
     const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
@@ -660,30 +677,46 @@ export function createAntigravityCatalogLoader({
         liveModels,
         mergedAntigravityRegistry(registry, liveModels.map((model) => model.id)),
       );
-      const enriched = models.some((model, index) => {
-        const original = liveModels[index];
-        return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
-      });
-      const value = {
-        models,
-        source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli",
+      if (models.length > 0) {
+        const enriched = models.some((model, index) => {
+          const original = liveModels[index];
+          return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
+        });
+        const value = {
+          models,
+          source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli",
+        };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        await persist(scope, value);
+        return value;
+      }
+      const fallback = await registryFallbackModels();
+      if (fallback.length > 0) {
+        const value = { models: fallback, source: "dsh_live_provider_registry" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        return value;
+      }
+      const empty = {
+        models: [],
+        source: "official_antigravity_cli",
+        diagnostics: ["Antigravity 官方 CLI 没有返回可用模型"],
       };
-      cached.set(scope, { value, cachedAt: Date.now() });
-      await persist(scope, value);
-      return value;
-    }).catch((error) => {
+      cached.set(scope, { value: empty, cachedAt: Date.now() });
+      return empty;
+    }).catch(async (error) => {
       const previous = cached.get(scope)?.value;
       if (previous?.models?.length) {
-        return {
-          ...previous,
-          source: `${previous.source ?? "official_antigravity_cli"}_stale`,
-          diagnostics: [redactError(error)],
-        };
+        // A previously published catalog stays selectable when the optional
+        // CLI is missing. Do not attach diagnostics: the toast treats any
+        // diagnostic as a failed vendor read.
+        return previous;
       }
-      // A missing or unavailable optional CLI must not reject DSH's global
-      // model directory. Keep the provider mounted with an empty live
-      // catalog; invocation and account scanning can report the actionable
-      // CLI error when the user actually selects Antigravity.
+      const fallback = await registryFallbackModels();
+      if (fallback.length > 0) {
+        const value = { models: fallback, source: "dsh_live_provider_registry" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        return value;
+      }
       const unavailable = {
         models: [],
         source: error?.code === "ENOENT"
@@ -1535,6 +1568,7 @@ export class AntigravityOfficialSessionDriver {
     usePtyForSessionRefresh = false,
     requestExecutor = null,
     catalogLoader = null,
+    registryLoader = null,
     quotaReader = null,
     tokenResolver = resolveAntigravityAccessToken,
     identityFromOfficialCli = true,
@@ -1655,6 +1689,7 @@ export class AntigravityOfficialSessionDriver {
       env,
       timeoutMs,
       commandRunner,
+      registryLoader,
     });
   }
 

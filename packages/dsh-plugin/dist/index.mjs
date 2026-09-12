@@ -5654,6 +5654,19 @@ function createAntigravityCatalogLoader({
     });
     return persistWrite;
   };
+  async function registryFallbackModels() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      return [];
+    }
+    return registryCatalogModels(
+      registry,
+      (model) => model.provider === "google" || model.provider === "google-vertex"
+    );
+  }
   const refresh = (scope) => {
     if (pending.has(scope)) return pending.get(scope);
     const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
@@ -5672,25 +5685,42 @@ function createAntigravityCatalogLoader({
         liveModels,
         mergedAntigravityRegistry(registry, liveModels.map((model) => model.id))
       );
-      const enriched = models.some((model, index) => {
-        const original = liveModels[index];
-        return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
-      });
-      const value = {
-        models,
-        source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli"
+      if (models.length > 0) {
+        const enriched = models.some((model, index) => {
+          const original = liveModels[index];
+          return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
+        });
+        const value = {
+          models,
+          source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli"
+        };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        await persist(scope, value);
+        return value;
+      }
+      const fallback = await registryFallbackModels();
+      if (fallback.length > 0) {
+        const value = { models: fallback, source: "dsh_live_provider_registry" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        return value;
+      }
+      const empty = {
+        models: [],
+        source: "official_antigravity_cli",
+        diagnostics: ["Antigravity \u5B98\u65B9 CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u6A21\u578B"]
       };
-      cached.set(scope, { value, cachedAt: Date.now() });
-      await persist(scope, value);
-      return value;
-    }).catch((error) => {
+      cached.set(scope, { value: empty, cachedAt: Date.now() });
+      return empty;
+    }).catch(async (error) => {
       const previous = cached.get(scope)?.value;
       if (previous?.models?.length) {
-        return {
-          ...previous,
-          source: `${previous.source ?? "official_antigravity_cli"}_stale`,
-          diagnostics: [redactError(error)]
-        };
+        return previous;
+      }
+      const fallback = await registryFallbackModels();
+      if (fallback.length > 0) {
+        const value = { models: fallback, source: "dsh_live_provider_registry" };
+        cached.set(scope, { value, cachedAt: Date.now() });
+        return value;
       }
       const unavailable = {
         models: [],
@@ -6132,6 +6162,7 @@ var AntigravityOfficialSessionDriver = class {
     usePtyForSessionRefresh = false,
     requestExecutor = null,
     catalogLoader = null,
+    registryLoader = null,
     quotaReader = null,
     tokenResolver = resolveAntigravityAccessToken,
     identityFromOfficialCli = true,
@@ -6244,7 +6275,8 @@ var AntigravityOfficialSessionDriver = class {
       cliPath,
       env,
       timeoutMs,
-      commandRunner
+      commandRunner,
+      registryLoader
     });
   }
   async #slash(command, signal) {
@@ -10516,7 +10548,8 @@ function createCursorCatalogLoader({
   env = process.env,
   commandRunner = runCliCommand,
   apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  registryLoader = null
 } = {}) {
   const cachedBuckets = /* @__PURE__ */ new Map();
   const pendingBuckets = /* @__PURE__ */ new Map();
@@ -10558,6 +10591,28 @@ function createCursorCatalogLoader({
       source: "official_cursor_browser_oauth_api"
     };
   }
+  async function registryModels2() {
+    if (typeof registryLoader !== "function") return [];
+    let registry;
+    try {
+      registry = await registryLoader();
+    } catch {
+      return [];
+    }
+    return registryCatalogModels(registry, (model) => model.provider === "cursor");
+  }
+  async function fallbackCatalog({ previous, error, desktop }) {
+    if (previous?.models?.length) return previous;
+    const models = await registryModels2();
+    if (models.length > 0) {
+      return { models, source: "dsh_live_provider_registry" };
+    }
+    return {
+      models: [],
+      source: error?.code === "ENOENT" ? desktop ? "cursor_desktop_app" : "cursor_cli_not_found" : "official_cursor_cli_status",
+      diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9 OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u672A\u8FD4\u56DE\u7ED3\u679C" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error?.message ?? "unknown error"}`]
+    };
+  }
   return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
     const bucketKey = catalogBucketKey(accounts);
     const hasBrowserAccount = bucketKey !== "shared";
@@ -10583,22 +10638,26 @@ function createCursorCatalogLoader({
         });
         const status = parseCursorAuthStatus(result.output);
         const models = status.models.map(normalizeModel).filter(Boolean);
-        const catalog = {
-          models,
-          source: "official_cursor_cli_status",
-          ...models.length ? {} : { diagnostics: ["Cursor \u5B98\u65B9 status \u6CA1\u6709\u8FD4\u56DE\u6A21\u578B\u76EE\u5F55"] }
-        };
-        if (models.length) cachedBuckets.set(bucketKey, catalog);
-        else cachedBuckets.delete(bucketKey);
+        if (models.length > 0) {
+          const catalog2 = { models, source: "official_cursor_cli_status" };
+          cachedBuckets.set(bucketKey, catalog2);
+          return catalog2;
+        }
+        const catalog = await fallbackCatalog({
+          previous: cached,
+          error: new Error("Cursor \u5B98\u65B9 status \u6CA1\u6709\u8FD4\u56DE\u6A21\u578B\u76EE\u5F55"),
+          desktop: readCursorDesktopSession({ env })
+        });
+        if (catalog.models.length) cachedBuckets.set(bucketKey, catalog);
         return catalog;
       } catch (error) {
-        const desktop = readCursorDesktopSession({ env });
-        const catalog = {
-          models: [],
-          source: error?.code === "ENOENT" ? desktop ? "cursor_desktop_app" : "cursor_cli_not_found" : "official_cursor_cli_status",
-          diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9 OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u672A\u8FD4\u56DE\u7ED3\u679C" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error.message}`]
-        };
-        cachedBuckets.delete(bucketKey);
+        const catalog = await fallbackCatalog({
+          previous: cached,
+          error,
+          desktop: readCursorDesktopSession({ env })
+        });
+        if (catalog.models.length) cachedBuckets.set(bucketKey, catalog);
+        else cachedBuckets.delete(bucketKey);
         return catalog;
       }
     })().finally(() => {
@@ -10616,6 +10675,7 @@ var CursorSubscriptionDriver = class {
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
+    registryLoader = null,
     sessionReader = null,
     sessionSource = "official_cursor_client",
     sessionSourceKind = OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
@@ -10648,7 +10708,8 @@ var CursorSubscriptionDriver = class {
       env,
       commandRunner,
       apiBaseUrl: this.apiBaseUrl,
-      fetchImpl: this.fetchImpl
+      fetchImpl: this.fetchImpl,
+      registryLoader
     });
     this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
       providerId: PROVIDER_ID9,
@@ -13822,7 +13883,10 @@ function apply(ctx, config = {}) {
         registryLoader: modelRegistryLoader
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
-      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {})
+      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader({
+        ...runtimeOptions.cursor ?? {},
+        registryLoader: modelRegistryLoader
+      })
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     runtimeOptions.usageLedger = runtimeOptions.usageLedger ?? usageLedger;
