@@ -23,7 +23,8 @@
 
 | 插件版本 | 状态 | 对应 DSH |
 |---|---|---|
-| **0.1.4**（当前） | ✅ | **0.1.5-rc.1 / 0.1.5-rc.2**（及之后的 0.1.5 线）；同时覆盖 0.1.1-rc.2 ～ 0.1.2-rc.1 |
+| **0.1.4**（当前 npm） | ✅ | **0.1.5-rc.1 / 0.1.5-rc.2**（及之后的 0.1.5 线） |
+| **main（#45 修复后）** | ✅ | 不再把 `@deepseek-ai/*` 当 `dependencies` 装进 profile，避免 hoist 旧 loader 把 DSH 启动树打挂 |
 
 ### 本次升级功能变化
 
@@ -65,6 +66,8 @@
 ```bash
 dsh plugin --profile web add github:meyaomiao/dsh-oauthpro
 ```
+
+`@deepseek-ai/*` 与 `@earendil-works/pi-ai` 由 **DSH 宿主提供**（peer），`dsh plugin add` 不会再把旧版 DSH 内部包 hoist 进 profile。需要 DSH **0.1.5 线**。若曾经用 0.1.4 装挂过启动树，先卸插件再装这一版，或删掉 profile 里 hoist 出来的 `@deepseek-ai/dsh-llm-pi-ai@0.1.1-rc.2` 一类旧包。
 
 重启 `dsh web` 后,输入框底栏出现 provider chip;硬刷新(Cmd/Ctrl+Shift+R)确保 client 为最新。
 
