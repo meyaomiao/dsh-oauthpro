@@ -29,6 +29,22 @@ import {
 const PROVIDER_ID = "cursor";
 const CREDENTIAL_SLOT = Symbol("dockyard-cursor-session");
 
+/**
+ * Last-resort catalog when AvailableModels, cursor-agent, the last cache, and
+ * a future pi-ai `cursor` route are all empty. Ids are Cursor's own slugs
+ * (the native transport forwards the string as-is); they must not be pi-ai
+ * anthropic/openai/google ids. Keep this list short: a connected account with
+ * no live directory should still be selectable, not look like a full Cursor
+ * model picker.
+ */
+export const BUILTIN_CURSOR_CATALOG = Object.freeze([
+  Object.freeze({ id: "default", name: "Auto" }),
+  Object.freeze({ id: "claude-4.5-sonnet", name: "Claude 4.5 Sonnet", contextWindow: 200_000 }),
+  Object.freeze({ id: "claude-4-sonnet", name: "Claude 4 Sonnet", contextWindow: 200_000 }),
+  Object.freeze({ id: "gpt-5", name: "GPT-5" }),
+  Object.freeze({ id: "gpt-5-mini", name: "GPT-5 Mini" }),
+]);
+
 function hash(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
@@ -459,20 +475,18 @@ export function createCursorCatalogLoader({
     return registryCatalogModels(registry, (model) => model.provider === "cursor");
   }
 
-  async function fallbackCatalog({ previous, error, desktop }) {
+  async function fallbackCatalog({ previous }) {
     if (previous?.models?.length) return previous;
     const models = await registryModels();
     if (models.length > 0) {
       return { models, source: "dsh_live_provider_registry" };
     }
+    // A connected Cursor account with no live directory must still publish
+    // selectable slugs. Diagnostics would make the toast report a failed
+    // vendor read and DSH would drop an empty group from /model.
     return {
-      models: [],
-      source: error?.code === "ENOENT"
-        ? (desktop ? "cursor_desktop_app" : "cursor_cli_not_found")
-        : "official_cursor_cli_status",
-      diagnostics: [desktop
-        ? "已检测到 Cursor 官方 OAuth；官方模型目录请求未返回结果"
-        : `无法读取 Cursor 官方模型目录：${error?.message ?? "unknown error"}`],
+      models: BUILTIN_CURSOR_CATALOG.map((model) => ({ ...model })),
+      source: "oauthpro_builtin_cursor_catalog",
     };
   }
 

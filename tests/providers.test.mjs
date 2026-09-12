@@ -49,6 +49,7 @@ import {
   parseClaudeAuthStatus,
 } from "../modules/provider-claude/src/index.mjs";
 import {
+  BUILTIN_CURSOR_CATALOG,
   createCursorCatalogLoader,
   createCursorCliExecutor,
   createCursorDriver,
@@ -2588,8 +2589,25 @@ test("Cursor catalog loader does not dump Claude or Gemini rows as a Cursor menu
     ],
   });
   const catalog = await loader();
-  assert.deepEqual(catalog.models, []);
-  assert.match(catalog.diagnostics[0], /spawn cursor-agent ENOENT/);
+  assert.equal(catalog.source, "oauthpro_builtin_cursor_catalog");
+  assert.equal(catalog.diagnostics, undefined);
+  assert.deepEqual(catalog.models.map((model) => model.id), BUILTIN_CURSOR_CATALOG.map((model) => model.id));
+  assert.ok(!catalog.models.some((model) => ["claude-haiku-4-5", "gpt-4o", "gemini-2.5-flash"].includes(model.id)));
+});
+
+test("Cursor catalog loader publishes builtin slugs when no live directory exists", async () => {
+  const loader = createCursorCatalogLoader({
+    commandRunner: async () => {
+      const error = new Error("spawn cursor-agent ENOENT");
+      error.code = "ENOENT";
+      throw error;
+    },
+  });
+  const catalog = await loader();
+  assert.equal(catalog.source, "oauthpro_builtin_cursor_catalog");
+  assert.equal(catalog.diagnostics, undefined);
+  assert.ok(catalog.models.some((model) => model.id === "default"));
+  assert.ok(catalog.models.some((model) => model.id === "claude-4.5-sonnet"));
 });
 
 test("Cursor catalog loader keeps the last live catalog when a later CLI read fails", async () => {

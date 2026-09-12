@@ -19,6 +19,7 @@ export function createCursorModule({ driver = {} } = {}) {
 }
 
 export {
+  BUILTIN_CURSOR_CATALOG,
   CursorSubscriptionDriver,
   createCursorCatalogLoader,
   createCursorCliExecutor,
