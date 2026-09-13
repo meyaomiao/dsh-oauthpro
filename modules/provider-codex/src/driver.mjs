@@ -822,6 +822,13 @@ export function createCodexPiAiExecutor({
     displayName: "OpenAI Codex",
     piProvider: provider,
     configuredMaxTokens: new Map(),
+    // DSH >= 0.1.5-rc.2 reads `profile.modelErrors.get(model)` unconditionally
+    // in PiAiAdapter.modelOf(), immediately after profileOf(). A profile
+    // without this Map makes every codex request throw
+    // `Cannot read properties of undefined (reading 'get')` before any network
+    // call. The host builds its own profiles with
+    // `modelErrors: catalog?.modelErrors ?? new Map()`, so mirror that shape.
+    modelErrors: new Map(),
     streamIdleTimeoutMs: 300_000,
   };
   const adapter = new PiAiAdapter({
