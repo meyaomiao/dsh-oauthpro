@@ -354,7 +354,7 @@ function parseJsonOutput(output) {
   }
 }
 
-function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
+function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal, onStderr } = {}) {
   return (async function* lines() {
     const child = spawn(command, args, {
       env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
@@ -385,7 +385,18 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
       timedOut = true;
       terminate();
     }, timeoutMs);
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      // Diagnostics only: a CLI that exits 0 without output explains itself on
+      // stderr (auto-denied permission), and the caller needs that text.
+      if (typeof onStderr === "function") {
+        try {
+          onStderr(chunk);
+        } catch {
+          // Never let a diagnostic sink break the run.
+        }
+      }
+    });
     child.once("error", (error) => {
       spawnError = error;
     });
@@ -951,19 +962,61 @@ function streamEventResult(payload) {
     usage: result.usage ?? payload.usage,
     status: result.status,
     error: result.error,
+    ...(Array.isArray(result.denied_actions)
+      ? {
+          deniedActions: result.denied_actions
+            .map((entry) => String(entry?.action ?? entry?.name ?? entry?.tool ?? "").trim())
+            .filter((action) => action.length > 0),
+        }
+      : {}),
   };
 }
+
+/**
+ * Explain a run that ended with no text at all.
+ *
+ * Antigravity print mode auto-denies any tool that needs a permission prompt it
+ * cannot show, then exits 0 with an empty response. Without this the harness
+ * only sees "provider stream ended without substantive output" and retries a
+ * deterministic failure. Codes here are deliberately outside the retryable set
+ * so the turn fails once, with the reason.
+ */
+function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
+  const denied = [...new Set(deniedActions)];
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 600) : "";
+  if (denied.length === 0 && hint.length === 0) return null;
+  const message = denied.length > 0
+    ? `Antigravity CLI 未产生任何输出：需要授权的工具被自动拒绝（${denied.join(", ")}）。print/headless 模式无法弹出授权提示，请改用 DSH 已注册的同类工具重试，或在 agy 的 settings.json 中通过 permissions.allow 放行。`
+    : `Antigravity CLI 未产生任何输出：${hint}`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = hint || null;
+  return error;
+}
+
+/**
+ * Antigravity CLI tool name → the DSH tool exposing the same capability.
+ *
+ * Print mode cannot open an interactive permission prompt, so a CLI tool the
+ * user has not allow-listed is auto-denied and the run ends with an empty
+ * response. Forwarding the intent to a DSH tool the request already declares
+ * keeps the DSH tool loop in charge of execution and permissions, which is the
+ * whole point of running the CLI behind the harness. Only tools DSH already
+ * registered are ever returned, so this map grants no new authority.
+ */
+const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
+  run_command: "bash",
+  read_url_content: "web_fetch",
+});
 
 function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  // Antigravity calls its command tool `run_command`; DSH presents the same
-  // capability as `bash`. Keep this translation at the protocol boundary so
-  // the actual DSH tool registry remains the source of truth.
-  if (providerToolName === "run_command") {
-    const bash = tools.find((tool) => tool?.name === "bash");
-    if (bash) return { name: bash.name, definition: bash };
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  if (translated) {
+    const target = tools.find((tool) => tool?.name === translated);
+    if (target) return { name: target.name, definition: target };
   }
   return null;
 }
@@ -988,6 +1041,18 @@ function toolCallFromEvent(payload, request) {
           ...(parameters.workdir ?? parameters.Cwd ? { workdir: parameters.workdir ?? parameters.Cwd } : {}),
           ...(parameters.timeoutMs ?? parameters.TimeoutMs ? { timeoutMs: parameters.timeoutMs ?? parameters.TimeoutMs } : {}),
         },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+      };
+    }
+  }
+  // The CLI reads a URL under `read_url_content` with a capitalized `Url`
+  // parameter; DSH's `web_fetch` takes `url`.
+  if (providerName === "read_url_content" && target.name === "web_fetch") {
+    const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
+    if (typeof url === "string" && url.length > 0) {
+      return {
+        name: target.name,
+        arguments: { url },
         id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
       };
     }
@@ -1044,10 +1109,16 @@ export function createAntigravityCliExecutor({
       let text = "";
       let usage = null;
       const handledTools = new Set();
+      // Print mode explains itself on stderr (e.g. an auto-denied tool) and then
+      // exits 0 with an empty response; keep a bounded copy for the diagnosis.
+      const diagnostics = { stderr: "", deniedActions: [] };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
         timeoutMs,
         signal: request.signal,
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 2_000) diagnostics.stderr += String(chunk);
+        },
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
@@ -1089,9 +1160,19 @@ export function createAntigravityCliExecutor({
             text += next;
             yield { type: "text-delta", index: 0, text: next };
           }
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = final.deniedActions;
+          }
           usage = usageFromResponse(final.usage) ?? usage;
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      if (text.length === 0) {
+        // Nothing visible was produced: surface the CLI's own explanation
+        // instead of letting the harness report a bare empty response (and
+        // retry a deterministic failure).
+        const emptyOutput = antigravityEmptyOutputError(diagnostics);
+        if (emptyOutput) throw emptyOutput;
       }
       yield { type: "block-end", index: 0, block: { type: "text", text } };
       if (usage) yield { type: "usage", usage };

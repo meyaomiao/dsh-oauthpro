@@ -1327,6 +1327,85 @@ test("Antigravity maps a native run_command event into DSH bash", async () => {
   ]);
 });
 
+test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async () => {
+  // Payload copied from a real `agy --output-format stream-json` run: the CLI
+  // asks to read a URL, print mode cannot prompt, and the tool is auto-denied
+  // unless the intent is forwarded to a DSH tool first.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://moiraism.org" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity reports an auto-denied CLI tool instead of an empty response", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (_path, _args, options) {
+      options?.onStderr?.(
+        "jetski: no output produced — a tool required the \"read_url\" permission that headless mode cannot prompt for, so it was auto-denied.",
+      );
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response" },
+      });
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: "", denied_actions: [{ action: "read_url" }] },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // Drain until the executor reports the diagnosis.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT" && /read_url/.test(error.message),
+  );
+});
+
 test("Antigravity maps a selected effort to the exact returned model row", async () => {
   const catalogLoader = async () => ({
     models: [
