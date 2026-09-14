@@ -1086,6 +1086,30 @@ function shellQuote(value) {
   return `'${String(value).split("'").join("'\\''")}'`;
 }
 
+/** Marker that identifies this adapter's own local-fetch calls in the history. */
+const LOCAL_FETCH_DESCRIPTION = "through the local network stack";
+
+/**
+ * Readable-text extractor for the local fetch: drops non-JSON-LD scripts,
+ * styles and comments before stripping tags, so the model receives page copy
+ * instead of minified JavaScript (which made it re-fetch the same URL).
+ */
+const LOCAL_FETCH_EXTRACTOR = [
+  "let s=\"\";process.stdin.setEncoding(\"utf8\");",
+  "process.stdin.on(\"data\",d=>s+=d);",
+  "process.stdin.on(\"end\",()=>{",
+  "const ent={\"&nbsp;\":\" \",\"&amp;\":\"&\",\"&lt;\":\"<\",\"&gt;\":\">\",\"&quot;\":String.fromCharCode(34),\"&#39;\":String.fromCharCode(39)};",
+  "s=s.replace(/<script\\b(?![^>]*application\\/ld\\+json)[^>]*>[\\s\\S]*?<\\/script>/gi,\" \")",
+  ".replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi,\" \")",
+  ".replace(/<!--[\\s\\S]*?-->/g,\" \")",
+  ".replace(/<[^>]*>/g,\" \")",
+  ".replace(/&(nbsp|amp|lt|gt|quot|#39);/g,m=>ent[m]||\" \")",
+  ".replace(/[ \\t\\r\\f\\v]+/g,\" \")",
+  ".replace(/\\n[ \\t]*/g,\"\\n\")",
+  ".replace(/\\n{3,}/g,\"\\n\\n\");",
+  "process.stdout.write(s.trim().slice(0,40000)+\"\\n\")});",
+].join("");
+
 /**
  * Read a URL through the machine's own network stack.
  *
@@ -1094,15 +1118,84 @@ function shellQuote(value) {
  * reserved address and tunnels the connection. This keeps the read auditable
  * (it is an ordinary `bash` tool call in the session) and grants no capability
  * the request's own tool list did not already carry.
+ *
+ * `--retry` covers the transient TLS/socket resets a TUN proxy produces; the
+ * Node extractor is expected on any machine running this plugin, with a plain
+ * tag-stripping `sed` fallback when `node` is not on PATH.
  */
+function antigravityLocalFetchCommand(url) {
+  return [
+    `curl -sSL --retry 2 --retry-connrefused --retry-delay 1 --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)}`,
+    `| { if command -v node >/dev/null 2>&1; then node -e ${shellQuote(LOCAL_FETCH_EXTRACTOR)}; else sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '; fi; }`,
+  ].join(" ");
+}
+
+function antigravityToolCallId(update, request) {
+  return String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`);
+}
+
 function antigravityLocalFetchToolCall(url, update, request) {
   return {
     name: "bash",
     arguments: {
-      command: `curl -sSL --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)} | sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '`,
-      description: `Fetch ${url} through the local network stack`,
+      command: antigravityLocalFetchCommand(url),
+      description: `Fetch ${url} ${LOCAL_FETCH_DESCRIPTION}`,
     },
-    id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+    id: antigravityToolCallId(update, request),
+  };
+}
+
+/** Join the text of one tool-result block. */
+function toolResultText(block) {
+  const content = Array.isArray(block?.content) ? block.content : [];
+  return content.map((entry) => (typeof entry?.text === "string" ? entry.text : "")).join("");
+}
+
+/**
+ * Whether this conversation already holds a *successful* local fetch of `url`.
+ *
+ * Matching the tool result by call id keeps a failed attempt (transient TLS
+ * reset, HTTP error, empty body) from suppressing the retry the model needs.
+ */
+function urlAlreadyFetchedLocally(request, url) {
+  const messages = Array.isArray(request?.messages) ? request.messages : [];
+  const commands = new Map();
+  const outputs = new Map();
+  for (const message of messages) {
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const block of content) {
+      if (block?.type === "tool-call" && typeof block.id === "string") {
+        commands.set(block.id, typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? ""));
+      } else if (block?.type === "tool-result" && typeof block.toolCallId === "string") {
+        outputs.set(block.toolCallId, toolResultText(block));
+      }
+    }
+  }
+  for (const [id, args] of commands) {
+    if (!args.includes(url) || !args.includes(LOCAL_FETCH_DESCRIPTION)) continue;
+    const output = outputs.get(id);
+    if (typeof output !== "string") continue;
+    const text = output.trim();
+    if (text.length < 200) continue;
+    if (/^\[stderr\]/.test(text) || /\bcurl: \(\d+\)/.test(text)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Cheap stand-in for a fetch whose content is already in the conversation.
+ * Re-running the request costs a network round trip and returns byte-identical
+ * text, so the model is told to work from what it already has.
+ */
+function antigravityRepeatFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: `echo ${shellQuote(`URL ${url} was already fetched in this conversation; its text is in the matching tool result above. Use it instead of fetching again.`)}`,
+      description: `Reuse the fetched content of ${url} instead of re-fetching it`,
+    },
+    id: antigravityToolCallId(update, request),
   };
 }
 
@@ -1148,6 +1241,9 @@ function toolCallFromEvent(payload, request, options = {}) {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
+        if (urlAlreadyFetchedLocally(request, url)) {
+          return antigravityRepeatFetchToolCall(url, update, request);
+        }
         return antigravityLocalFetchToolCall(url, update, request);
       }
       return {

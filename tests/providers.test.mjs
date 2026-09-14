@@ -1423,9 +1423,115 @@ test("Antigravity reads URLs through curl when the proxy answers DNS with fake I
   const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
   assert.equal(call.name, "bash");
   const parsed = JSON.parse(call.arguments);
-  assert.match(parsed.command, /^curl -sSL --max-time 30 --max-filesize 5000000 -- 'https:\/\/moiraism\.org\/'/);
-  assert.match(parsed.command, /sed -e 's\/<\[\^>\]\*>\//);
+  // Transient TLS resets through a TUN proxy are retried, and the extractor runs
+  // Node (always present beside this plugin) with a sed-only fallback.
+  assert.match(parsed.command, /^curl -sSL --retry 2 --retry-connrefused --retry-delay 1 --max-time 30 --max-filesize 5000000 -- 'https:\/\/moiraism\.org\/'/);
+  assert.match(parsed.command, /command -v node >\/dev\/null 2>&1; then node -e '/);
+  assert.match(parsed.command, /else sed -e 's\/<\[\^>\]\*>\//);
   assert.equal(parsed.description, "Fetch https://moiraism.org/ through the local network stack");
+});
+
+test("Antigravity reuses an already fetched URL instead of fetching it again", async () => {
+  const command = "curl -sSL --max-time 30 --max-filesize 5000000 -- 'https://moiraism.org/'";
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const history = [
+    { role: "user", content: [{ type: "text", text: "check my site" }] },
+    {
+      role: "assistant",
+      content: [{
+        type: "tool-call",
+        id: "agy-fetch-1",
+        name: "bash",
+        arguments: JSON.stringify({ command, description: "Fetch https://moiraism.org/ through the local network stack" }),
+      }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool-result", toolCallId: "agy-fetch-1", content: [{ type: "text", text: "MOIRAISM 首页正文 ".repeat(30) }] }],
+    },
+  ];
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: history,
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const parsed = JSON.parse(call.arguments);
+  assert.match(parsed.description, /^Reuse the fetched content of https:\/\/moiraism\.org\//);
+  assert.match(parsed.command, /^echo '/);
+  assert.equal(/curl /.test(parsed.command), false, "a successful fetch must not be repeated");
+});
+
+test("Antigravity still fetches when the previous attempt failed", async () => {
+  const command = "curl -sSL --max-time 30 --max-filesize 5000000 -- 'https://moiraism.org/'";
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const history = [
+    { role: "user", content: [{ type: "text", text: "check my site" }] },
+    {
+      role: "assistant",
+      content: [{
+        type: "tool-call",
+        id: "agy-fetch-1",
+        name: "bash",
+        arguments: JSON.stringify({ command, description: "Fetch https://moiraism.org/ through the local network stack" }),
+      }],
+    },
+    {
+      role: "user",
+      content: [{
+        type: "tool-result",
+        toolCallId: "agy-fetch-1",
+        content: [{ type: "text", text: "[stderr]\ncurl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to moiraism.org:443 \n" }],
+      }],
+    },
+  ];
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: history,
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const parsed = JSON.parse(call.arguments);
+  assert.match(parsed.description, /^Fetch https:\/\/moiraism\.org\//);
+  assert.match(parsed.command, /^curl -sSL /);
 });
 
 test("Antigravity escapes quotes in the local fetch command", async () => {
