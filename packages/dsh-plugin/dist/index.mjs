@@ -6064,7 +6064,8 @@ function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
 }
 var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   run_command: "bash",
-  read_url_content: "web_fetch"
+  read_url_content: "web_fetch",
+  search_web: "web_search"
 });
 function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
@@ -6107,6 +6108,17 @@ function toolCallFromEvent(payload, request) {
       return {
         name: target.name,
         arguments: { url },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+      };
+    }
+  }
+  if (providerName2 === "search_web" && target.name === "web_search") {
+    const query = parameters.query ?? parameters.Query ?? parameters.q;
+    const queries = Array.isArray(parameters.queries) ? parameters.queries : typeof query === "string" && query.trim().length > 0 ? [query.trim()] : [];
+    if (queries.length > 0) {
+      return {
+        name: target.name,
+        arguments: { queries },
         id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
       };
     }

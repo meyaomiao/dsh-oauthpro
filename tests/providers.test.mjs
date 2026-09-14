@@ -1373,6 +1373,52 @@ test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async 
   ]);
 });
 
+test("Antigravity maps the CLI search_web tool into DSH web_search", async () => {
+  // Payload copied from a real `agy --output-format stream-json` run: the CLI
+  // searches with a single `query` string, while DSH's web_search requires
+  // `queries: [...]`.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "search_web",
+          tool_info: { name: "search_web", parameters: { query: "site:moiraism.org" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_search", description: "Search the web", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_search",
+        arguments: JSON.stringify({ queries: ["site:moiraism.org"] }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
 test("Antigravity reports an auto-denied CLI tool instead of an empty response", async () => {
   const executor = createAntigravityCliExecutor({
     cliPath: "agy-test",

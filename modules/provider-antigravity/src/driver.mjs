@@ -1007,6 +1007,7 @@ function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
 const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   run_command: "bash",
   read_url_content: "web_fetch",
+  search_web: "web_search",
 });
 
 function requestTool(request, providerToolName) {
@@ -1053,6 +1054,23 @@ function toolCallFromEvent(payload, request) {
       return {
         name: target.name,
         arguments: { url },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+      };
+    }
+  }
+  // The CLI searches with a single `query` string; DSH's `web_search` takes a
+  // required `queries` array (1–4 entries).
+  if (providerName === "search_web" && target.name === "web_search") {
+    const query = parameters.query ?? parameters.Query ?? parameters.q;
+    const queries = Array.isArray(parameters.queries)
+      ? parameters.queries
+      : typeof query === "string" && query.trim().length > 0
+        ? [query.trim()]
+        : [];
+    if (queries.length > 0) {
+      return {
+        name: target.name,
+        arguments: { queries },
         id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
       };
     }
