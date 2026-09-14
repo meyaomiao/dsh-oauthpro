@@ -1291,9 +1291,16 @@ function harnessFailureCode(error) {
   return null;
 }
 function attachHarnessFailure(error) {
-  if (!error || typeof error !== "object" || error.failure !== void 0) return error;
+  if (!error || typeof error !== "object") return error;
   const code = harnessFailureCode(error);
   if (!code) return error;
+  if (error.code === void 0 || error.code === null) {
+    try {
+      error.code = code;
+    } catch {
+    }
+  }
+  if (error.failure !== void 0) return error;
   let message = typeof error.message === "string" && error.message.length > 0 ? error.message : "provider request failed";
   message = message.replace(/\s+/g, " ").trim().slice(0, 500);
   const numericStatus2 = Number(error.upstreamStatus ?? error.status);
@@ -4245,7 +4252,9 @@ async function* readSseEvents(response) {
     if (error?.code === "SSE_PROTOCOL_ERROR") throw error;
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     if (!error?.providerId && error?.name !== "AbortError") {
-      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion");
+      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion", {
+        code: "TRANSPORT"
+      });
       if (error !== void 0 && error !== null) wrapped.cause = error;
       wrapped.networkError = true;
       throw wrapped;
@@ -7916,11 +7925,14 @@ async function* streamGrokResponse(response) {
     }
   }
   if (!terminated) {
-    throw nativeProviderError(
+    const error = nativeProviderError(
       PROVIDER_ID5,
       "xAI stream ended without a finish_reason or [DONE] terminator; the response may be truncated",
-      { code: "GROK_TRUNCATED_STREAM" }
+      { code: "TRANSPORT" }
     );
+    error.truncated = true;
+    error.networkError = true;
+    throw error;
   }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
   if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text4 } };

@@ -517,7 +517,9 @@ export async function* readSseEvents(response) {
       // A connection dying mid-SSE (reset, premature close, truncation) is a
       // transient transport fault, not a provider verdict — wrap it the same
       // way as pre-response failures so it classifies and retries upstream.
-      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion");
+      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion", {
+        code: "TRANSPORT",
+      });
       if (error !== undefined && error !== null) wrapped.cause = error;
       wrapped.networkError = true;
       throw wrapped;

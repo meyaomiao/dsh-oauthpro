@@ -76,9 +76,17 @@ export function harnessFailureCode(error) {
  * snapshot, preserving the human-readable message. Returns the same error.
  */
 export function attachHarnessFailure(error) {
-  if (!error || typeof error !== "object" || error.failure !== undefined) return error;
+  if (!error || typeof error !== "object") return error;
   const code = harnessFailureCode(error);
   if (!code) return error;
+  if (error.code === undefined || error.code === null) {
+    try {
+      error.code = code;
+    } catch {
+      // Some frozen error objects reject property assignment.
+    }
+  }
+  if (error.failure !== undefined) return error;
   let message = typeof error.message === "string" && error.message.length > 0
     ? error.message
     : "provider request failed";

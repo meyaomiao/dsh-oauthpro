@@ -664,6 +664,36 @@ test("fetchNativeResponse re-throws transient network error once retries are exh
   assert.equal(attempts, 3);
 });
 
+test("Grok native transport maps mid-stream network termination to retryable TRANSPORT fault", async () => {
+  const executor = createGrokNativeExecutor({
+    endpoint: "https://xai.test/v1/chat/completions",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: (async function* stream() {
+        yield new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"start"}}]}
+
+`);
+        const err = new TypeError("fetch failed");
+        err.cause = new Error("other side closed");
+        throw err;
+      })(),
+    }),
+  });
+  await assert.rejects(
+    collect(await executor({
+      credential: { access: "grok-oauth" },
+      request: { model: "grok-4.5", messages: [{ role: "user", content: "Hi" }] },
+    })),
+    (error) => {
+      assert.equal(error.networkError, true);
+      assert.equal(error.code, "TRANSPORT");
+      assert.match(error.message, /stream was interrupted before completion|fetch failed/);
+      return true;
+    },
+  );
+});
+
 test("Cursor protocol preserves inline image data instead of a placeholder", () => {
   const encoded = encodeAgentRunRequest({
     model: "cursor-test",
