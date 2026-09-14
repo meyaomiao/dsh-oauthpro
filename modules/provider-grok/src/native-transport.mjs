@@ -222,11 +222,14 @@ async function* streamGrokResponse(response) {
     // Neither [DONE] nor a finish_reason arrived: the connection was cut
     // before the model finished. Fail as a protocol error instead of closing
     // the generator with a synthetic "stop" success.
-    throw nativeProviderError(
+    const error = nativeProviderError(
       PROVIDER_ID,
       "xAI stream ended without a finish_reason or [DONE] terminator; the response may be truncated",
-      { code: "GROK_TRUNCATED_STREAM" },
+      { code: "TRANSPORT" },
     );
+    error.truncated = true;
+    error.networkError = true;
+    throw error;
   }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
   if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };
