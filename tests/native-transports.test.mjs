@@ -614,6 +614,56 @@ test("Grok token-validation errors mark the OAuth account unusable", async () =>
   );
 });
 
+test("fetchNativeResponse retries idempotent pre-response transient network errors", async () => {
+  let attempts = 0;
+  const response = await fetchNativeResponse("https://xai.test/v1/chat/completions", {
+    method: "POST",
+  }, {
+    providerId: "grok",
+    retryDelaysMs: [1, 1],
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new TypeError("fetch failed");
+        error.cause = new Error("connect ECONNRESET");
+        throw error;
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "ok",
+      };
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(response.status, 200);
+});
+
+test("fetchNativeResponse re-throws transient network error once retries are exhausted", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    fetchNativeResponse("https://xai.test/v1/chat/completions", {
+      method: "POST",
+    }, {
+      providerId: "grok",
+      maxRetries: 2,
+      retryDelaysMs: [1, 1],
+      fetchImpl: async () => {
+        attempts += 1;
+        const error = new TypeError("fetch failed");
+        error.cause = new Error("socket hang up");
+        throw error;
+      },
+    }),
+    (error) => {
+      assert.equal(error.networkError, true);
+      assert.match(error.message, /grok native request failed/);
+      return true;
+    },
+  );
+  assert.equal(attempts, 3);
+});
+
 test("Cursor protocol preserves inline image data instead of a placeholder", () => {
   const encoded = encodeAgentRunRequest({
     model: "cursor-test",
