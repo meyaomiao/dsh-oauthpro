@@ -11,6 +11,16 @@ import { attachHarnessFailure } from "../../providers/src/failure-classification
  * - RATE_LIMIT/SERVER/EMPTY_RESPONSE: classic provider-side retryables.
  * Quota (QUOTA), credentials (INVALID_CREDENTIAL), malformed requests, and
  * context overflow (CONTEXT_WINDOW_EXCEEDED) deliberately stay non-retried.
+ *
+ * Shape contract: the harness consumes the adapter's `providerRetryPolicy()` as
+ * an ALREADY-RESOLVED policy — the flat output of its own
+ * `resolveRetryPolicy()`, where the backoff fields sit at the top level. A
+ * nested `backoff: { ... }` (the *config* shape accepted from settings) leaves
+ * `initialDelayMs` / `maxDelayMs` / `jitterRatio` undefined here, so
+ * `dsh-llm-retry` computes `delayMs = NaN` and then dies appending its own
+ * event: `session event "llm/retry" carries non-JSON-serializable data`
+ * (non-finite numbers are rejected). The turn fails and no retry ever happens,
+ * so these three fields must stay flat.
  */
 const PROVIDER_RETRY_POLICY = Object.freeze({
   mode: "normal",
@@ -22,11 +32,9 @@ const PROVIDER_RETRY_POLICY = Object.freeze({
     "TIMEOUT",
     "TRANSPORT",
   ]),
-  backoff: Object.freeze({
-    initialDelayMs: 1_000,
-    maxDelayMs: 30_000,
-    jitterRatio: 0.2,
-  }),
+  initialDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  jitterRatio: 0.2,
 });
 
 function effortName(id) {
