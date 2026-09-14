@@ -216,10 +216,41 @@ async function readBoundedResponseText(response, limit = MAX_ERROR_BODY_BYTES) {
   return String(raw ?? "").slice(0, limit);
 }
 
+function isPreResponseTransientNetworkError(error) {
+  if (!error) return false;
+  if (error.name === "AbortError") return false;
+  if (error.providerId && !error.networkError) return false;
+  const message = `${error.message ?? ""} ${error.cause?.message ?? ""}`.toLowerCase();
+  const code = String(error.code ?? error.cause?.code ?? "").toUpperCase();
+  return (
+    error instanceof TypeError
+    || error.name === "TypeError"
+    || message.includes("fetch failed")
+    || message.includes("network request failed")
+    || message.includes("econnreset")
+    || message.includes("socket hang up")
+    || message.includes("connection reset")
+    || message.includes("other side closed")
+    || message.includes("premature close")
+    || message.includes("und_err_")
+    || code === "ECONNRESET"
+    || code === "ETIMEDOUT"
+    || code === "EPIPE"
+    || code === "ECONNREFUSED"
+    || code === "UND_ERR_SOCKET"
+    || code === "UND_ERR_CONNECT_TIMEOUT"
+    || code === "UND_ERR_HEADERS_TIMEOUT"
+  );
+}
+
+const DEFAULT_FETCH_RETRY_DELAYS_MS = Object.freeze([250, 600]);
+
 export async function fetchNativeResponse(url, init = {}, {
   providerId,
   timeoutMs = 300_000,
   fetchImpl = fetch,
+  maxRetries = 2,
+  retryDelaysMs = DEFAULT_FETCH_RETRY_DELAYS_MS,
 } = {}) {
   const controller = new AbortController();
   let timedOut = false;
@@ -244,43 +275,64 @@ export async function fetchNativeResponse(url, init = {}, {
     if (upstreamSignal.aborted) abort();
     else upstreamSignal.addEventListener("abort", abort, { once: true });
   }
-  try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    if (response.ok === false || (response.status !== undefined && response.status >= 400)) {
-      let body = null;
-      try {
-        body = await readBoundedResponseText(response);
-      } catch {
-        // Preserve the HTTP status when a mock or a broken upstream has no
-        // readable error body.
+
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await fetchImpl(url, { ...init, signal: controller.signal });
+      if (response.ok === false || (response.status !== undefined && response.status >= 400)) {
+        let body = null;
+        try {
+          body = await readBoundedResponseText(response);
+        } catch {
+          // Preserve the HTTP status when a mock or a broken upstream has no
+          // readable error body.
+        }
+        const details = errorDetails(body);
+        throw nativeProviderError(providerId, details.message, {
+          status: response.status,
+          body,
+          code: details.code,
+        });
       }
-      const details = errorDetails(body);
-      throw nativeProviderError(providerId, details.message, {
-        status: response.status,
-        body,
-        code: details.code,
-      });
+      nativeResponseControls.set(response, control);
+      handedOff = true;
+      return response;
+    } catch (error) {
+      if (error?.name === "AbortError" && timedOut && !error.providerId) {
+        if (!handedOff) cleanup();
+        throw timeoutError;
+      }
+      // If the caller already aborted explicitly, don't retry.
+      if (upstreamSignal?.aborted) {
+        if (!handedOff) cleanup();
+        throw error;
+      }
+      // Retry idempotent pre-response transient network faults (e.g. stale socket
+      // RST, DNS/TLS transient handshake failure, undici fetch failed).
+      if (attempt < maxRetries && !timedOut && isPreResponseTransientNetworkError(error)) {
+        const delayMs = retryDelaysMs[attempt] ?? 500;
+        attempt += 1;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (upstreamSignal?.aborted || timedOut) {
+          if (!handedOff) cleanup();
+          throw timedOut ? timeoutError : error;
+        }
+        continue;
+      }
+      if (!handedOff) cleanup();
+      if (!error?.providerId && error?.name !== "AbortError") {
+        // Raw transport errors (undici's "TypeError: fetch failed", DNS/TLS/
+        // socket failures) must not escape unclassified — they would surface
+        // as an immediate, unretried turn failure downstream. Re-raise them as
+        // provider-native transient faults while preserving the cause chain.
+        const wrapped = nativeProviderError(providerId, error?.message || "network request failed");
+        if (error !== undefined && error !== null) wrapped.cause = error;
+        wrapped.networkError = true;
+        throw wrapped;
+      }
+      throw error;
     }
-    nativeResponseControls.set(response, control);
-    handedOff = true;
-    return response;
-  } catch (error) {
-    if (error?.name === "AbortError" && timedOut && !error.providerId) {
-      throw timeoutError;
-    }
-    if (!error?.providerId && error?.name !== "AbortError") {
-      // Raw transport errors (undici's "TypeError: fetch failed", DNS/TLS/
-      // socket failures) must not escape unclassified — they would surface
-      // as an immediate, unretried turn failure downstream. Re-raise them as
-      // provider-native transient faults while preserving the cause chain.
-      const wrapped = nativeProviderError(providerId, error?.message || "network request failed");
-      if (error !== undefined && error !== null) wrapped.cause = error;
-      wrapped.networkError = true;
-      throw wrapped;
-    }
-    throw error;
-  } finally {
-    if (!handedOff) cleanup();
   }
 }
 
