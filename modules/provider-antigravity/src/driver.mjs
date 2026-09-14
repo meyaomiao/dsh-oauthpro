@@ -354,14 +354,22 @@ function parseJsonOutput(output) {
   }
 }
 
-function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
+function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal, stdin } = {}) {
   return (async function* lines() {
+    // A long prompt must not ride in argv (`spawn E2BIG`); it arrives as NDJSON
+    // on stdin instead, so the pipe only exists for that transport.
+    const input = typeof stdin === "string" ? stdin : null;
     const child = spawn(command, args, {
       env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       ...(signal ? { signal } : {}),
     });
+    // A CLI that refuses the turn (unknown model, denied permission) exits
+    // before draining stdin; that surfaces as EPIPE, which is expected here and
+    // must never escape as an unhandled stream error.
+    child.stdin?.on("error", () => { /* the CLI stopped reading */ });
+    if (input !== null) child.stdin.end(input);
     const stdout = [];
     const stderr = [];
     let spawnError = null;
@@ -883,6 +891,43 @@ export function antigravityRequestPrompt(request = {}) {
   return sections.join("\n\n") || "Continue the conversation.";
 }
 
+/**
+ * Prompt budget that still travels as `argv`.
+ *
+ * `execve` caps argv+env at `kern.argmax` (1 MiB on macOS) and, on Linux, caps
+ * a single argv string at `MAX_ARG_STRLEN` (128 KiB). Handing agy the whole
+ * conversation as `-p <prompt>` therefore dies with `spawn E2BIG` as soon as a
+ * session grows past the cap — the failure is raised by the kernel before the
+ * CLI even starts, so it can never be retried away. 64 KiB leaves six times
+ * the headroom for the environment and stays far below the Linux per-string
+ * limit; larger prompts use the CLI's NDJSON stream input on stdin instead.
+ */
+export const AGY_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024;
+
+/**
+ * Resolve how one print-mode turn carries its prompt.
+ *
+ * Short turns keep the exact `-p <prompt>` invocation that has always been
+ * verified against the official CLI. Long turns switch to
+ * `--input-format stream-json` and put the prompt in a single NDJSON `user`
+ * event on stdin, which removes the prompt from argv entirely.
+ */
+export function antigravityPromptInvocation(prompt, {
+  thresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+} = {}) {
+  const text = typeof prompt === "string" ? prompt : String(prompt ?? "");
+  if (Buffer.byteLength(text, "utf8") < thresholdBytes) {
+    return { args: ["-p", text], stdin: null };
+  }
+  return {
+    args: ["--input-format", "stream-json"],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: [{ type: "text", text }] },
+    })}\n`,
+  };
+}
+
 function usageFromResponse(usage) {
   if (!usage || typeof usage !== "object") return null;
   const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
@@ -1015,6 +1060,7 @@ export function createAntigravityCliExecutor({
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
+  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -1029,7 +1075,10 @@ export function createAntigravityCliExecutor({
       reasoningEffort: request.reasoningEffort,
     });
     return (async function* responseStream() {
-      const args = ["-p", antigravityRequestPrompt(request)];
+      const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
+        thresholdBytes: promptStdinThresholdBytes,
+      });
+      const args = [...invocation.args];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
         args.push("--model", resolved.model);
       }
@@ -1048,6 +1097,7 @@ export function createAntigravityCliExecutor({
         env,
         timeoutMs,
         signal: request.signal,
+        stdin: invocation.stdin,
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
