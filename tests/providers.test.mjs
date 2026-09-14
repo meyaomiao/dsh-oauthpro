@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -26,6 +27,7 @@ import {
   createAntigravityNativeQuotaReader,
   enrichAntigravityModelCatalog,
   extractAntigravityAccountEmail,
+  antigravityPromptInvocation,
   antigravityRequestPrompt,
   parseAntigravityNativeQuota,
   parseAntigravityKeychainValue,
@@ -1299,6 +1301,116 @@ test("Antigravity executor calls the official CLI with the selected model and ef
     { type: "usage", usage: { inputTokens: 3, outputTokens: 2 } },
     { type: "finish", reason: { kind: "stop" } },
   ]);
+});
+
+test("Antigravity keeps the argv prompt while it fits the kernel budget", () => {
+  const invocation = antigravityPromptInvocation("system:\nbe brief");
+  assert.deepEqual(invocation.args, ["-p", "system:\nbe brief"]);
+  assert.equal(invocation.stdin, null);
+});
+
+test("Antigravity measures the prompt budget in bytes, not characters", () => {
+  // 40k CJK characters are ~120KB on the wire: under the character count, but
+  // well past the 64 KiB argv budget, so it must use the stdin transport.
+  const cjk = "汉".repeat(40_000);
+  const invocation = antigravityPromptInvocation(cjk);
+  assert.deepEqual(invocation.args, ["--input-format", "stream-json"]);
+  const payload = JSON.parse(invocation.stdin);
+  assert.equal(payload.event, "user");
+  assert.equal(payload.message.role, "user");
+  assert.equal(payload.message.content[0].text, cjk);
+});
+
+test("Antigravity moves an oversized prompt off argv onto stdin", () => {
+  const prompt = `system:\n${"x".repeat(200_000)}`;
+  const invocation = antigravityPromptInvocation(prompt);
+  assert.deepEqual(invocation.args, ["--input-format", "stream-json"]);
+  // Nothing resembling the conversation may stay in argv: that is what the
+  // kernel rejects with E2BIG before the CLI can even start.
+  assert.ok(invocation.args.every((arg) => arg.length < 64));
+  assert.ok(invocation.stdin.endsWith("\n"));
+  const payload = JSON.parse(invocation.stdin);
+  assert.equal(payload.event, "user");
+  assert.equal(payload.message.content[0].type, "text");
+  assert.equal(payload.message.content[0].text, prompt);
+});
+
+test("Antigravity executor hands an oversized prompt to the CLI runner as stdin", async () => {
+  let command;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, options) {
+      command = { path, args, options };
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      system: "s".repeat(300_000),
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+  });
+  for await (const _chunk of stream) { /* drain */ }
+  assert.deepEqual(command.args.slice(0, 2), ["--input-format", "stream-json"]);
+  assert.equal(command.args.includes("-p"), false);
+  assert.ok(command.args.every((arg) => arg.length < 64));
+  const payload = JSON.parse(command.options.stdin);
+  assert.match(payload.message.content[0].text, /^system:\ns{300000}/);
+});
+
+test("Antigravity executor delivered a >ARG_MAX prompt through real CLI stdin", {
+  // The fixture is a POSIX shell script: the negative control relies on
+  // execve-level argv limits that Windows does not express the same way.
+  skip: process.platform === "win32" ? "POSIX shell fixture" : false,
+}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-e2big-"));
+  try {
+    const capturePath = join(dir, "input.ndjson");
+    const argvPath = join(dir, "argv.txt");
+    const scriptPath = join(dir, "fake-agy.sh");
+    await writeFile(scriptPath, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}`,
+      `cat > ${JSON.stringify(capturePath)}`,
+      `printf '{"event":"result","result":{"status":"SUCCESS","response":"received %s bytes","usage":{"input_tokens":1,"output_tokens":1}}}\\n' "$(wc -c < ${JSON.stringify(capturePath)} | tr -d ' ')"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const request = {
+      model: "gemini-live-medium",
+      system: "x".repeat(1_500_000),
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    };
+    const prompt = antigravityRequestPrompt(request);
+    // Negative control: the pre-fix `-p <prompt>` transport cannot even exec.
+    const argvFailure = spawnSync(scriptPath, ["-p", prompt]);
+    assert.equal(argvFailure.error?.code, "E2BIG");
+
+    const executor = createAntigravityCliExecutor({ cliPath: scriptPath, env: process.env });
+    const stream = await executor({ request });
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+
+    const argvLines = (await readFile(argvPath, "utf8")).split("\n").filter(Boolean);
+    assert.ok(argvLines.includes("--input-format"));
+    assert.equal(argvLines.includes("-p"), false);
+    assert.ok(argvLines.every((line) => line.length < 128));
+
+    const raw = await readFile(capturePath, "utf8");
+    const delivered = JSON.parse(raw);
+    assert.equal(delivered.event, "user");
+    assert.equal(delivered.message.content[0].text, prompt);
+
+    const text = chunks.find((chunk) => chunk.type === "text-delta")?.text ?? "";
+    assert.equal(text, `received ${Buffer.byteLength(raw, "utf8")} bytes`);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity maps a native run_command event into DSH bash", async () => {

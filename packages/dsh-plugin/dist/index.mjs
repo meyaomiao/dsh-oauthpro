@@ -5544,14 +5544,18 @@ function parseJsonOutput2(output) {
     return null;
   }
 }
-function runStreamingCommand(command, args, { env = process.env, timeoutMs = 3e5, signal, onStderr } = {}) {
+function runStreamingCommand(command, args, { env = process.env, timeoutMs = 3e5, signal, stdin, onStderr } = {}) {
   return (async function* lines() {
+    const input = typeof stdin === "string" ? stdin : null;
     const child = spawn4(command, args, {
       env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       ...signal ? { signal } : {}
     });
+    child.stdin?.on("error", () => {
+    });
+    if (input !== null) child.stdin.end(input);
     const stdout = [];
     const stderr = [];
     let spawnError = null;
@@ -5987,6 +5991,23 @@ ${text4}`);
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }
+var AGY_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024;
+function antigravityPromptInvocation(prompt, {
+  thresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES
+} = {}) {
+  const text4 = typeof prompt === "string" ? prompt : String(prompt ?? "");
+  if (Buffer.byteLength(text4, "utf8") < thresholdBytes) {
+    return { args: ["-p", text4], stdin: null };
+  }
+  return {
+    args: ["--input-format", "stream-json"],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: [{ type: "text", text: text4 }] }
+    })}
+`
+  };
+}
 function usageFromResponse(usage) {
   if (!usage || typeof usage !== "object") return null;
   const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
@@ -6280,7 +6301,8 @@ function createAntigravityCliExecutor({
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
-  detectFakeIp = detectFakeIpEnvironment
+  detectFakeIp = detectFakeIpEnvironment,
+  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -6296,7 +6318,10 @@ function createAntigravityCliExecutor({
     });
     const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
     return (async function* responseStream() {
-      const args = ["-p", antigravityRequestPrompt(request)];
+      const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
+        thresholdBytes: promptStdinThresholdBytes
+      });
+      const args = [...invocation.args];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
         args.push("--model", resolved.model);
       }
@@ -6313,6 +6338,7 @@ function createAntigravityCliExecutor({
         env,
         timeoutMs,
         signal: request.signal,
+        stdin: invocation.stdin,
         onStderr: (chunk) => {
           if (diagnostics.stderr.length < 2e3) diagnostics.stderr += String(chunk);
         }
