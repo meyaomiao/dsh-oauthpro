@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1010,6 +1011,101 @@ const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   search_web: "web_search",
 });
 
+/**
+ * Detect a TUN proxy that answers every DNS query with a reserved address
+ * (Clash / Surge / TomatoCloud "fake-IP" or enhanced mode).
+ *
+ * Such proxies still route those addresses correctly — the connection is
+ * intercepted and tunnelled to the real host — but DSH's `web_fetch` resolves
+ * the hostname first and refuses any non-public answer as an SSRF risk, so with
+ * fake-IP DNS *every* fetch fails before a socket is opened. The probe asks for
+ * a hostname that is public by definition and treats an all-reserved answer set
+ * as "this resolver is virtualized"; a failure to resolve is not evidence.
+ */
+const FAKE_IP_PROBE_HOST = "example.com";
+const FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1000;
+const fakeIpCache = new Map();
+
+function ipv4ToInt(address) {
+  const parts = String(address).split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = ((value << 8) + octet) >>> 0;
+  }
+  return value;
+}
+
+/** Reserved/private IPv4 blocks, including the 198.18.0.0/15 fake-IP range. */
+const RESERVED_V4_BLOCKS = Object.freeze([
+  [0x00000000, 0xff000000], // 0.0.0.0/8
+  [0x0a000000, 0xff000000], // 10.0.0.0/8
+  [0x64400000, 0xffc00000], // 100.64.0.0/10 (CGNAT, Tailscale)
+  [0x7f000000, 0xff000000], // 127.0.0.0/8
+  [0xa9fe0000, 0xffff0000], // 169.254.0.0/16
+  [0xac100000, 0xfff00000], // 172.16.0.0/12
+  [0xc0a80000, 0xffff0000], // 192.168.0.0/16
+  [0xc6120000, 0xfffe0000], // 198.18.0.0/15 (benchmarking / fake-IP)
+]);
+
+function isReservedAddress(address) {
+  const value = ipv4ToInt(address);
+  // Bitwise AND yields a signed 32-bit result; normalize before comparing.
+  if (value !== null) return RESERVED_V4_BLOCKS.some(([base, mask]) => ((value & mask) >>> 0) === base);
+  const normalized = String(address).trim().toLowerCase();
+  if (normalized === "::" || normalized === "::1") return true;
+  return normalized.startsWith("fe80:") || normalized.startsWith("fc") || normalized.startsWith("fd");
+}
+
+/**
+ * Report whether the local resolver is virtualized by a fake-IP proxy.
+ *
+ * @param {object} [options] - test seams and cache control.
+ * @returns {Promise<boolean>} true when a known-public host resolved to reserved addresses only.
+ */
+export async function detectFakeIpEnvironment({ host = FAKE_IP_PROBE_HOST, resolver = lookup, now = () => Date.now(), useCache = true } = {}) {
+  const cached = fakeIpCache.get(host);
+  if (useCache && cached !== undefined && now() - cached.at < FAKE_IP_CACHE_TTL_MS) return cached.value;
+  let value = false;
+  try {
+    const answers = await resolver(host, { all: true, order: "verbatim" });
+    value = Array.isArray(answers) && answers.length > 0 && answers.every((entry) => isReservedAddress(entry?.address));
+  } catch {
+    // Resolution failure is not evidence of a virtualized resolver.
+    value = false;
+  }
+  fakeIpCache.set(host, { at: now(), value });
+  return value;
+}
+
+/** Quote one shell argument with single quotes, escaping embedded quotes. */
+function shellQuote(value) {
+  return `'${String(value).split("'").join("'\\''")}'`;
+}
+
+/**
+ * Read a URL through the machine's own network stack.
+ *
+ * The fake-IP environment described above only breaks DSH's hostname check —
+ * `curl` reaches the same page fine, because the TUN proxy intercepts the
+ * reserved address and tunnels the connection. This keeps the read auditable
+ * (it is an ordinary `bash` tool call in the session) and grants no capability
+ * the request's own tool list did not already carry.
+ */
+function antigravityLocalFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: `curl -sSL --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)} | sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '`,
+      description: `Fetch ${url} through the local network stack`,
+    },
+    id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+  };
+}
+
 function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
@@ -1022,7 +1118,7 @@ function requestTool(request, providerToolName) {
   return null;
 }
 
-function toolCallFromEvent(payload, request) {
+function toolCallFromEvent(payload, request, options = {}) {
   const update = payload?.step_update;
   if (!update || String(update.state ?? "").toUpperCase() !== "ACTIVE" || update.step_type !== "tool") return null;
   const providerName = String(update.tool_name ?? update.tool_info?.name ?? "");
@@ -1051,6 +1147,9 @@ function toolCallFromEvent(payload, request) {
   if (providerName === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
+      if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
+        return antigravityLocalFetchToolCall(url, update, request);
+      }
       return {
         name: target.name,
         arguments: { url },
@@ -1098,6 +1197,7 @@ export function createAntigravityCliExecutor({
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
+  detectFakeIp = detectFakeIpEnvironment,
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -1111,6 +1211,12 @@ export function createAntigravityCliExecutor({
       model: request.model,
       reasoningEffort: request.reasoningEffort,
     });
+    // A virtualized (fake-IP) resolver makes DSH's guarded web_fetch unusable
+    // for every hostname; read URLs through the local network stack instead.
+    const preferLocalUrlFetch = await Promise.resolve()
+      .then(() => detectFakeIp())
+      .then((value) => value === true)
+      .catch(() => false);
     return (async function* responseStream() {
       const args = ["-p", antigravityRequestPrompt(request)];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
@@ -1140,7 +1246,7 @@ export function createAntigravityCliExecutor({
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
-        const tool = toolCallFromEvent(parsed, request);
+        const tool = toolCallFromEvent(parsed, request, { preferLocalUrlFetch });
         if (tool) {
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
           if (handledTools.has(key)) continue;

@@ -22,6 +22,7 @@ import {
   createAntigravityCliExecutor,
   createAntigravityDriver,
   createAntigravityOAuthAuthorizer,
+  detectFakeIpEnvironment,
   createAntigravityNativeQuotaReader,
   enrichAntigravityModelCatalog,
   extractAntigravityAccountEmail,
@@ -1349,6 +1350,7 @@ test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async 
   // unless the intent is forwarded to a DSH tool first.
   const executor = createAntigravityCliExecutor({
     cliPath: "agy-test",
+    detectFakeIp: async () => false,
     streamCommandRunner: async function* () {
       yield JSON.stringify({
         event: "step_update",
@@ -1387,6 +1389,89 @@ test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async 
     },
     { type: "finish", reason: { kind: "tool-calls" } },
   ]);
+});
+
+test("Antigravity reads URLs through curl when the proxy answers DNS with fake IPs", async () => {
+  // A TUN proxy in fake-IP mode resolves every hostname to 198.18.0.0/15, which
+  // DSH's guarded web_fetch rejects before connecting. The connection itself is
+  // fine, so the URL read is routed through the request's own bash tool.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  assert.equal(call.name, "bash");
+  const parsed = JSON.parse(call.arguments);
+  assert.match(parsed.command, /^curl -sSL --max-time 30 --max-filesize 5000000 -- 'https:\/\/moiraism\.org\/'/);
+  assert.match(parsed.command, /sed -e 's\/<\[\^>\]\*>\//);
+  assert.equal(parsed.description, "Fetch https://moiraism.org/ through the local network stack");
+});
+
+test("Antigravity escapes quotes in the local fetch command", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://example.test/?q=it's; rm -rf /" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const command = JSON.parse(call.arguments).command;
+  // The whole URL stays inside one single-quoted shell word: no command runs.
+  assert.ok(command.includes(`'https://example.test/?q=it'\\''s; rm -rf /'`), command);
+});
+
+test("detectFakeIpEnvironment recognizes a virtualized resolver", async () => {
+  const fake = async () => [{ address: "198.19.0.33", family: 4 }];
+  const publicOnly = async () => [{ address: "93.184.216.34", family: 4 }];
+  const mixed = async () => [{ address: "93.184.216.34", family: 4 }, { address: "198.19.0.33", family: 4 }];
+  const failing = async () => {
+    throw new Error("no dns");
+  };
+  assert.equal(await detectFakeIpEnvironment({ resolver: fake, useCache: false, host: "probe-fake.test" }), true);
+  assert.equal(await detectFakeIpEnvironment({ resolver: async () => [{ address: "10.0.0.1", family: 4 }], useCache: false, host: "probe-private.test" }), true);
+  assert.equal(await detectFakeIpEnvironment({ resolver: publicOnly, useCache: false, host: "probe-public.test" }), false);
+  assert.equal(await detectFakeIpEnvironment({ resolver: mixed, useCache: false, host: "probe-mixed.test" }), false);
+  assert.equal(await detectFakeIpEnvironment({ resolver: failing, useCache: false, host: "probe-error.test" }), false);
 });
 
 test("Antigravity maps the CLI search_web tool into DSH web_search", async () => {

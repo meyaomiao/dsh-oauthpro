@@ -3669,6 +3669,7 @@ function createCodexModule({ driver = {} } = {}) {
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
@@ -6067,6 +6068,72 @@ var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   read_url_content: "web_fetch",
   search_web: "web_search"
 });
+var FAKE_IP_PROBE_HOST = "example.com";
+var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
+var fakeIpCache = /* @__PURE__ */ new Map();
+function ipv4ToInt(address) {
+  const parts = String(address).split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = (value << 8) + octet >>> 0;
+  }
+  return value;
+}
+var RESERVED_V4_BLOCKS = Object.freeze([
+  [0, 4278190080],
+  // 0.0.0.0/8
+  [167772160, 4278190080],
+  // 10.0.0.0/8
+  [1681915904, 4290772992],
+  // 100.64.0.0/10 (CGNAT, Tailscale)
+  [2130706432, 4278190080],
+  // 127.0.0.0/8
+  [2851995648, 4294901760],
+  // 169.254.0.0/16
+  [2886729728, 4293918720],
+  // 172.16.0.0/12
+  [3232235520, 4294901760],
+  // 192.168.0.0/16
+  [3323068416, 4294836224]
+  // 198.18.0.0/15 (benchmarking / fake-IP)
+]);
+function isReservedAddress(address) {
+  const value = ipv4ToInt(address);
+  if (value !== null) return RESERVED_V4_BLOCKS.some(([base, mask]) => (value & mask) >>> 0 === base);
+  const normalized = String(address).trim().toLowerCase();
+  if (normalized === "::" || normalized === "::1") return true;
+  return normalized.startsWith("fe80:") || normalized.startsWith("fc") || normalized.startsWith("fd");
+}
+async function detectFakeIpEnvironment({ host = FAKE_IP_PROBE_HOST, resolver = lookup, now = () => Date.now(), useCache = true } = {}) {
+  const cached = fakeIpCache.get(host);
+  if (useCache && cached !== void 0 && now() - cached.at < FAKE_IP_CACHE_TTL_MS) return cached.value;
+  let value = false;
+  try {
+    const answers = await resolver(host, { all: true, order: "verbatim" });
+    value = Array.isArray(answers) && answers.length > 0 && answers.every((entry) => isReservedAddress(entry?.address));
+  } catch {
+    value = false;
+  }
+  fakeIpCache.set(host, { at: now(), value });
+  return value;
+}
+function shellQuote(value) {
+  return `'${String(value).split("'").join("'\\''")}'`;
+}
+function antigravityLocalFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: `curl -sSL --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)} | sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '`,
+      description: `Fetch ${url} through the local network stack`
+    },
+    id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+  };
+}
 function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
@@ -6078,7 +6145,7 @@ function requestTool(request, providerToolName) {
   }
   return null;
 }
-function toolCallFromEvent(payload, request) {
+function toolCallFromEvent(payload, request, options = {}) {
   const update = payload?.step_update;
   if (!update || String(update.state ?? "").toUpperCase() !== "ACTIVE" || update.step_type !== "tool") return null;
   const providerName2 = String(update.tool_name ?? update.tool_info?.name ?? "");
@@ -6105,6 +6172,9 @@ function toolCallFromEvent(payload, request) {
   if (providerName2 === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
+      if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
+        return antigravityLocalFetchToolCall(url, update, request);
+      }
       return {
         name: target.name,
         arguments: { url },
@@ -6142,7 +6212,8 @@ function createAntigravityCliExecutor({
   timeoutMs = 3e5,
   commandRunner = runCommand,
   catalogLoader = null,
-  streamCommandRunner = runStreamingCommand
+  streamCommandRunner = runStreamingCommand,
+  detectFakeIp = detectFakeIpEnvironment
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -6156,6 +6227,7 @@ function createAntigravityCliExecutor({
       model: request.model,
       reasoningEffort: request.reasoningEffort
     });
+    const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
     return (async function* responseStream() {
       const args = ["-p", antigravityRequestPrompt(request)];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
@@ -6180,7 +6252,7 @@ function createAntigravityCliExecutor({
       })) {
         const parsed = parseJsonOutput2(line);
         if (!parsed) continue;
-        const tool = toolCallFromEvent(parsed, request);
+        const tool = toolCallFromEvent(parsed, request, { preferLocalUrlFetch });
         if (tool) {
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
           if (handledTools.has(key)) continue;

@@ -26,6 +26,7 @@ export {
   createAntigravityCatalogLoader,
   createAntigravityDriver,
   createAntigravityOAuthAuthorizer,
+  detectFakeIpEnvironment,
   enrichAntigravityModelCatalog,
   extractAntigravityAccountEmail,
   parseAntigravityModelCatalog,
