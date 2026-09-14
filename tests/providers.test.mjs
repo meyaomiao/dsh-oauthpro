@@ -638,16 +638,32 @@ test("Antigravity driver uses official CLI data without requiring token storage"
     if (args[0] === "models") return { output: "Fetching available models...\nmodel-from-provider\tLive model\n", errorOutput: "" };
     throw new Error("unexpected command");
   };
-  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null });
-  const secretStore = new MemorySecretStore();
-  const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
-  assert.equal(discovered.candidates.length, 1);
-  const account = await driver.importAccount(discovered.candidates[0], { secretStore });
-  const quota = await driver.getQuota(account, { secretStore, now: new Date("2026-08-14T12:00:00.000Z") });
-  assert.equal(quota.quota.remaining, 0.75);
-  assert.equal(quota.resources, undefined);
-  assert.equal(quota.credits.remaining, 4);
-  assert.deepEqual((await driver.getCatalog()).models, [{ id: "model-from-provider", name: "Live model" }]);
+  // The default catalog cache is the shared ~/.dockyard-dsh/antigravity-catalog.json,
+  // which a running DSH host (and other suites) write live provider data into.
+  // Reading it here made this test pass or fail depending on the machine state.
+  const home = await mkdtemp(join(tmpdir(), "agy-driver-catalog-"));
+  try {
+    const driver = createAntigravityDriver({
+      commandRunner,
+      tokenResolver: () => null,
+      env: {
+        ...process.env,
+        DOCKYARD_DSH_HOME: home,
+        DOCKYARD_ANTIGRAVITY_CATALOG_CACHE: join(home, "antigravity-catalog.json"),
+      },
+    });
+    const secretStore = new MemorySecretStore();
+    const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
+    assert.equal(discovered.candidates.length, 1);
+    const account = await driver.importAccount(discovered.candidates[0], { secretStore });
+    const quota = await driver.getQuota(account, { secretStore, now: new Date("2026-08-14T12:00:00.000Z") });
+    assert.equal(quota.quota.remaining, 0.75);
+    assert.equal(quota.resources, undefined);
+    assert.equal(quota.credits.remaining, 4);
+    assert.deepEqual((await driver.getCatalog()).models, [{ id: "model-from-provider", name: "Live model" }]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity account discovery keeps provider identity and captures distinct local sessions", async () => {
