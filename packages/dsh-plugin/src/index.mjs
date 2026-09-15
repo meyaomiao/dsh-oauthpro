@@ -4,6 +4,7 @@ import { createDefaultProviderEntries, DockyardRuntime } from "../../runtime/src
 import { createDockyardLlmAdapter } from "../../dsh-bridge/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
+  createAntigravityCliExecutor,
   createAntigravityNativeExecutor,
   createAntigravityNativeQuotaReader,
   createAntigravityProjectResolver,
@@ -71,9 +72,20 @@ export function apply(ctx, config = {}) {
     runtimeOptions.requestExecutors = {
       ...(runtimeOptions.requestExecutors ?? {}),
       "openai-codex": runtimeOptions.requestExecutors?.["openai-codex"] ?? createCodexDshRequestExecutor(),
-      antigravity: runtimeOptions.requestExecutors?.antigravity ?? createAntigravityNativeExecutor({
-        ...antigravityOptions,
-      }),
+      // Google decommissioned the legacy v1internal JSON facade for accounts
+      // that purchased Google AI Pro (loadCodeAssist no longer returns a Code
+      // Assist project; quota/stream endpoints answer 403 SUBSCRIPTION_REQUIRED
+      // #3501). Chat therefore defaults to the official agy CLI executor; set
+      // DOCKYARD_ANTIGRAVITY_NATIVE_CHAT=1 to opt back into the native
+      // transport (for example, when the new client contract is implemented).
+      // See issue #63.
+      antigravity: runtimeOptions.requestExecutors?.antigravity
+        ?? (process.env.DOCKYARD_ANTIGRAVITY_NATIVE_CHAT === "1"
+          ? createAntigravityNativeExecutor({ ...antigravityOptions })
+          : createAntigravityCliExecutor({
+            ...antigravityOptions,
+            catalogLoader: antigravityCatalogLoader,
+          })),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),

@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -259,8 +260,21 @@ function oauthRecordFromObject(value, depth = 0) {
 }
 
 function readOfficialTokenFile(path) {
+  let raw;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    // Only a missing file means "no session yet". A permission/IO failure is a
+    // different condition and must not be silently downgraded to "not logged
+    // in", which would evict a healthy account from the pool as auth_expired.
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    const wrapped = new Error(`Antigravity token file could not be read: ${error?.code ?? error?.message}`);
+    wrapped.code = error?.code ?? "ANTIGRAVITY_TOKEN_READ_FAILED";
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  try {
+    const parsed = JSON.parse(raw);
     const record = oauthRecordFromObject(parsed);
     return record
       ? {
@@ -270,6 +284,8 @@ function readOfficialTokenFile(path) {
       }
       : null;
   } catch {
+    // A truncated or corrupted file is not a session; callers fall through to
+    // the Keychain copy and their own "authorize again" diagnostic.
     return null;
   }
 }
@@ -315,6 +331,20 @@ export function parseAntigravityKeychainValue(value) {
 let cachedKeychainToken = null;
 let lastKeychainReadTime = 0;
 const KEYCHAIN_CACHE_TTL_MS = 60_000; // Cache Keychain result for 1 minute to avoid synchronous IPC lag
+
+/**
+ * Drop the cached Keychain session.
+ *
+ * agy rotates the token in place, so after DSH itself refreshes or imports a
+ * credential the cached copy is stale for up to a minute. Callers that just
+ * wrote a fresh session must invalidate, otherwise the fingerprint comparison
+ * in the driver reads the old token and rejects the account as "not the active
+ * local session".
+ */
+export function invalidateAntigravityKeychainCache() {
+  cachedKeychainToken = null;
+  lastKeychainReadTime = 0;
+}
 
 /** Read agy's current macOS Keychain session without displaying its secret. */
 export function readAntigravityKeychainToken({ home = homedir() } = {}) {
@@ -405,12 +435,14 @@ export function createAntigravityProjectResolver({
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
   const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
+  // A Code Assist project belongs to exactly one credential. The old key was
+  // the bare account id (or "default"), which survived re-authorization and
+  // leaked one account's project into another account's quota call.
   const cache = new Map();
+  const CACHE_TTL_MS = 30 * 60 * 1000;
+  const CACHE_MAX_ENTRIES = 8;
   return async ({ credential = null, account = null, context = {} } = {}) => {
     if (configuredProject) return configuredProject;
-    const cacheKey = account?.accountId ?? context.accountId ?? "default";
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
     const auth = await tokenResolver({
       credential,
       env: { ...env, ...(context.env ?? {}) },
@@ -421,6 +453,11 @@ export function createAntigravityProjectResolver({
       error.authExpired = true;
       throw error;
     }
+    const identity = account?.accountId ?? context.accountId ?? "anonymous";
+    const cacheKey = `${identity}:${createHash("sha256").update(auth.token).digest("hex").slice(0, 16)}`;
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.project;
+    if (cached) cache.delete(cacheKey);
     const headers = {
       authorization: `Bearer ${auth.token}`,
       "content-type": "application/json",
@@ -445,7 +482,11 @@ export function createAntigravityProjectResolver({
     if (!resolved) {
       throw nativeProviderError(PROVIDER_ID, "Antigravity did not return a Code Assist project for the selected account", { body: raw });
     }
-    cache.set(cacheKey, resolved);
+    cache.set(cacheKey, { project: resolved, at: Date.now() });
+    // Keep the map bounded: rotated tokens create a new entry each time.
+    while (cache.size > CACHE_MAX_ENTRIES) {
+      cache.delete(cache.keys().next().value);
+    }
     return resolved;
   };
 }

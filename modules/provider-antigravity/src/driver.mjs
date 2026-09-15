@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,6 +32,7 @@ import {
 } from "../../../packages/providers/src/session-source.mjs";
 import {
   createAntigravityNativeQuotaReader,
+  invalidateAntigravityKeychainCache,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
 } from "./native-transport.mjs";
@@ -268,17 +271,14 @@ function credentialRefreshMode(account) {
 }
 
 function cliFailure(code, signal, output, errorOutput) {
-  const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
-  error.code = code;
+  const error = new Error(`Antigravity CLI failed (${signal ?? code ?? "no exit status"})`);
+  error.code = code ?? "ANTIGRAVITY_CLI_EXIT";
   const structured = parseJsonOutput(output);
   const structuredDetail = structured?.error
     ?? structured?.response
     ?? structured?.result?.error
     ?? structured?.result?.response;
-  error.detail = String(errorOutput || structuredDetail || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 300);
+  error.detail = trimDetail(errorOutput || structuredDetail);
   return error;
 }
 
@@ -354,14 +354,22 @@ function parseJsonOutput(output) {
   }
 }
 
-function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal } = {}) {
+function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300_000, signal, stdin, onStderr } = {}) {
   return (async function* lines() {
+    // A long prompt must not ride in argv (`spawn E2BIG`); it arrives as NDJSON
+    // on stdin instead, so the pipe only exists for that transport.
+    const input = typeof stdin === "string" ? stdin : null;
     const child = spawn(command, args, {
       env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
       ...(signal ? { signal } : {}),
     });
+    // A CLI that refuses the turn (unknown model, denied permission) exits
+    // before draining stdin; that surfaces as EPIPE, which is expected here and
+    // must never escape as an unhandled stream error.
+    child.stdin?.on("error", () => { /* the CLI stopped reading */ });
+    if (input !== null) child.stdin.end(input);
     const stdout = [];
     const stderr = [];
     let spawnError = null;
@@ -385,7 +393,18 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
       timedOut = true;
       terminate();
     }, timeoutMs);
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      // Diagnostics only: a CLI that exits 0 without output explains itself on
+      // stderr (auto-denied permission), and the caller needs that text.
+      if (typeof onStderr === "function") {
+        try {
+          onStderr(chunk);
+        } catch {
+          // Never let a diagnostic sink break the run.
+        }
+      }
+    });
     child.once("error", (error) => {
       spawnError = error;
     });
@@ -407,15 +426,43 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
       reader.close();
       terminate();
       clearTimeout(timer);
+      // Do not let the caller start the next turn while this CLI is still
+      // dying: a forwarded tool call ends the process with SIGTERM, and a fast
+      // tool (echo, a cached read) would otherwise race the shutdown — the CLI
+      // then answers the next turn with status "interrupted". Bounded by the
+      // SIGKILL escalation, and never longer than the grace period.
+      await Promise.race([closed, delay(2_000)]);
     }
     const result = await closed;
     const output = stdout.join("\n");
     const errorOutput = Buffer.concat(stderr).toString("utf8");
     if (spawnError) throw spawnError;
+    // A killed CLI can still report exit code 0 (`agy` exits cleanly on
+    // SIGTERM), so the timeout must be checked before the exit code or a
+    // half-finished turn is silently treated as a complete empty response.
+    if (timedOut) {
+      const timeoutError = new Error(`Antigravity CLI timed out after ${timeoutMs}ms`);
+      timeoutError.code = "TIMEOUT";
+      timeoutError.detail = trimDetail(errorOutput);
+      throw timeoutError;
+    }
     if (result.code !== 0) {
-      throw cliFailure(result.code, timedOut ? "SIGTERM" : result.signal, output, errorOutput);
+      throw cliFailure(result.code, result.signal, output, errorOutput);
     }
   })();
+}
+
+/** Bound one diagnostic string for error.detail without losing its head. */
+function trimDetail(value, limit = 300) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+/** Unref'd delay used to bound a best-effort wait. */
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 function normalizeToken(value) {
@@ -821,11 +868,29 @@ function contentText(value) {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join("\n");
   if (!value || typeof value !== "object") return "";
+  // Tool blocks must be recognized before the generic `content` unwrap below:
+  // a tool-result also owns a `content` array, which otherwise swallows the
+  // block and drops the call-id label that pairs output with its command.
+  if (value.type === "tool-call") {
+    // `arguments` is usually an object; string interpolation would render it as
+    // "[object Object]", hiding WHICH command the assistant already ran. The
+    // model then re-issues the identical call every turn and burns quota.
+    const args = typeof value.arguments === "string"
+      ? value.arguments
+      : JSON.stringify(value.arguments ?? {});
+    return `[tool call: ${value.name ?? "unknown"}${value.id ? ` id=${value.id}` : ""}] ${args}`;
+  }
+  if (value.type === "tool-result") {
+    const text = contentText(value.content);
+    // Label every result with its call id so the model can pair each output
+    // with the exact call above instead of guessing (and re-running it).
+    return value.toolCallId
+      ? `[tool result for id=${value.toolCallId}]\n${text}`
+      : text;
+  }
   if (typeof value.text === "string") return value.text;
   if (typeof value.content === "string" || Array.isArray(value.content)) return contentText(value.content);
   if (value.type === "image") return "[previous image attachment omitted by Antigravity CLI]";
-  if (value.type === "tool-call") return `[tool call: ${value.name ?? "unknown"}] ${value.arguments ?? ""}`;
-  if (value.type === "tool-result") return contentText(value.content);
   return "";
 }
 
@@ -870,17 +935,356 @@ function messagesWithinContext(request) {
   return [...systemMessages, ...selected];
 }
 
+// DEGRADATION PATH ONLY (see the note below): these rules shape the flattened
+// prompt used by the replay fallback.
+//
+// The CLI is spawned statelessly once per turn with the whole transcript
+// flattened into a single prompt. Without these rules the model treats its own
+// past "[tool call]" lines as reference material instead of completed work:
+// it re-runs similar commands every turn, never narrates, and never converges
+// on a final answer (the "endless silent Bash turns" incident).
+const ANTIGRAVITY_TRANSCRIPT_RULES = [
+  "rules:",
+  "- 历史记录里你已经执行过的命令及其输出仅供参考：不要重复执行相同或相似的命令。",
+  "- 拿到最近的命令输出后，如果信息已经足以回答用户，必须直接输出最终结论，禁止再发起任何工具调用。",
+  "- 需要执行命令时，必须通过原生工具调用发起；绝对不要在回复文本里书写工具调用或命令的执行请求。",
+  "- 每次发起工具调用前，先用一句话向用户说明你要做什么、为什么。",
+  "- 最终结论必须直接回应最初的用户问题，使用用户的语言，而不是复述调查过程。",
+].join("\n");
+
+// Mid-conversation turns replay the whole flattened history in one prompt, and
+// agy's per-turn latency scales roughly linearly with that input (measured:
+// 113 KiB ≈ 46k tokens ≈ 27 s generation, before tool work). A day-long
+// session therefore blows past the executor's 300 s kill and looks like a
+// silent hang, while fresh (short) conversations work fine. Capping the
+// message history keeps every turn in the regime that is verified to work;
+// the system section and the newest turns always survive.
+export const AGY_PROMPT_HISTORY_BYTE_CAP = 60_000;
+
+/** Flatten the whole transcript for the degradation path (never the anchor). */
 export function antigravityRequestPrompt(request = {}) {
-  const sections = [];
+  const header = [];
   if (typeof request.system === "string" && request.system.length > 0) {
-    sections.push(`system:\n${request.system}`);
+    header.push(`system:\n${request.system}`);
   }
+  header.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  const messageSections = [];
   for (const message of messagesWithinContext(request)) {
     const text = messageText(message);
     if (!text) continue;
-    sections.push(`${message?.role ?? "message"}:\n${text}`);
+    messageSections.push(`${message?.role ?? "message"}:\n${text}`);
+  }
+  // Drop the OLDEST message sections until the flattened prompt fits the cap.
+  let sections = [...header, ...messageSections];
+  let drop = 0;
+  while (
+    messageSections.length > 0
+    && Buffer.byteLength(sections.join("\n\n"), "utf8") > AGY_PROMPT_HISTORY_BYTE_CAP
+    && drop < messageSections.length
+  ) {
+    drop += 1;
+    sections = [...header, ...messageSections.slice(drop)];
   }
   return sections.join("\n\n") || "Continue the conversation.";
+}
+
+/**
+ * Permission mirroring (design §4.2).
+ *
+ * agy print mode cannot ask for permission, so any tool call outside its
+ * `permissions.allow` list is auto-denied, the run ends with an empty response,
+ * and the anchored turn degrades to the slow replay path. DSH's own bash tool
+ * runs with the session's file policy (danger-full-access here), so mirroring
+ * means keeping agy's allow list at least as permissive as the DSH side. The
+ * merge is append-only: user rules are never removed, and the first write keeps
+ * a `.bak` copy next to the file.
+ */
+export const ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
+  "read_file(/)",
+  // Writing is the whole point of an implementation turn; without this rule the
+  // CLI auto-denies every write_file call (observed: "user denied permission for
+  // write_file(/Users/xzb/Documents/.../package.json)") and the turn ends empty.
+  "write_file(/)",
+  "command(*)",
+  "unsandboxed(*)",
+]);
+
+export function antigravitySettingsFile(env = process.env, home = homedir()) {
+  return env?.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE
+    || join(home, ".gemini", "antigravity-cli", "settings.json");
+}
+
+// One merge per settings file per process: the check is cheap, but there is no
+// reason to stat/read the file on every turn.
+const mirroredPermissionFiles = new Set();
+
+export function ensureAntigravityPermissionMirror({ file, fsModule = null, enabled = true } = {}) {
+  if (!enabled || !file || mirroredPermissionFiles.has(file)) return null;
+  mirroredPermissionFiles.add(file);
+  return mirrorAntigravityPermissions({ file, fsModule });
+}
+
+export function mirrorAntigravityPermissions({
+  file,
+  rules = ANTIGRAVITY_DEFAULT_ALLOW_RULES,
+  fsModule = null,
+} = {}) {
+  const syncFs = fsModule ?? { readFileSync, writeFileSync, mkdirSync, renameSync, copyFileSync, existsSync };
+  const extra = String(process.env.DOCKYARD_ANTIGRAVITY_EXTRA_ALLOW ?? "")
+    .split(",")
+    .map((rule) => rule.trim())
+    .filter(Boolean);
+  const wanted = [...rules, ...extra];
+  let settings = {};
+  let existed = false;
+  try {
+    const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+    settings = parsed && typeof parsed === "object" ? parsed : {};
+    existed = true;
+  } catch {
+    settings = {};
+  }
+  const permissions = settings.permissions && typeof settings.permissions === "object" ? settings.permissions : {};
+  const allow = Array.isArray(permissions.allow) ? permissions.allow.slice() : [];
+  const missing = wanted.filter((rule) => !allow.includes(rule));
+  if (missing.length === 0) return { changed: false, added: [], allow };
+  allow.push(...missing);
+  settings.permissions = { ...permissions, allow };
+  try {
+    syncFs.mkdirSync(dirname(file), { recursive: true });
+    if (existed && !syncFs.existsSync(`${file}.bak`)) {
+      try { syncFs.copyFileSync(file, `${file}.bak`); } catch { /* best effort */ }
+    }
+    const tmp = `${file}.${randomUUID()}.tmp`;
+    syncFs.writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
+    syncFs.renameSync(tmp, file);
+  } catch {
+    // Mirroring is best-effort: a failure only means agy keeps its old rules.
+  }
+  return { changed: true, added: missing, allow };
+}
+
+/**
+ * Sideband requests are harness bookkeeping that happens to travel through the
+ * same provider+session: session titles (`purpose: "session-title"`) and
+ * compaction summaries (`purpose: "compaction"`). They must never touch the
+ * anchored agy conversation — a title prompt inside the user's memory is
+ * pollution — and they do not need the replay machinery beyond a plain
+ * one-shot run.
+ */
+const ANTIGRAVITY_SIDEBAND_PURPOSES = new Set(["session-title", "compaction", "session-summary"]);
+const ANTIGRAVITY_TITLE_SYSTEM_MARKER = /^Create a concise title for an AI coding-assistant session/m;
+
+export function isAntigravitySidebandRequest(request = {}) {
+  const purpose = typeof request?.purpose === "string" ? request.purpose.trim().toLowerCase() : "";
+  if (purpose.length > 0 && purpose !== "assistant") return true;
+  const system = typeof request?.system === "string" ? request.system.trim() : "";
+  return ANTIGRAVITY_TITLE_SYSTEM_MARKER.test(system);
+}
+
+/**
+ * Session-anchor mode (final architecture, docs/antigravity-persistent-bridge-design.md §8).
+ *
+ * agy's `--conversation <id>` restores full in-process memory across processes
+ * (verified against agy 1.2.3), so each DSH conversation maps to one agy
+ * conversation id: the first turn creates it, later turns reattach. Memory
+ * lives in agy's local conversation store, so web restarts, model switches and
+ * process crashes no longer lose context. The legacy flattened-replay path
+ * below remains as the fallback for calls without a session id and for
+ * failures of the anchored path.
+ */
+export function antigravityConversationsFile(env = process.env, home = homedir()) {
+  return process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE
+    || env?.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE
+    || join(home, ".dockyard-dsh", "antigravity-conversations.json");
+}
+
+export function createAntigravityConversationStore({ file, fsModule = null } = {}) {
+  const syncFs = fsModule ?? { readFileSync, writeFileSync, mkdirSync, renameSync };
+  let cache = null;
+  const load = () => {
+    if (cache) return cache;
+    try {
+      const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+      cache = parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      cache = {};
+    }
+    return cache;
+  };
+  return {
+    get(key) {
+      if (!key) return null;
+      const value = load()[key];
+      return value && typeof value === "object" ? value : null;
+    },
+    set(key, value) {
+      if (!key || !value) return;
+      const data = load();
+      data[key] = value;
+      cache = data;
+      try {
+        syncFs.mkdirSync(dirname(file), { recursive: true });
+        const tmp = `${file}.${randomUUID()}.tmp`;
+        syncFs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+        syncFs.renameSync(tmp, file);
+      } catch {
+        // Persistence is best-effort: losing the mapping only costs memory
+        // continuity, the next turn simply starts a fresh agy conversation.
+      }
+    },
+  };
+}
+
+/**
+ * Bounded per-turn diagnostics for the anchored path.
+ *
+ * The anchored turn degrades silently by design, so without this a failed turn
+ * looks exactly like "the model never answered" — the incident that motivated
+ * the whole session-anchor work. Each run appends one JSON line with the CLI's
+ * own evidence (events, result status, denied actions, stderr head, fallback
+ * reason); the file is truncated once it exceeds the cap.
+ */
+export const AGY_ANCHOR_LOG_MAX_BYTES = 512 * 1024;
+
+export function appendAntigravityAnchorLog(file, entry) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    let size = 0;
+    try { size = statSync(file).size; } catch { size = 0; }
+    if (size > AGY_ANCHOR_LOG_MAX_BYTES) writeFileSync(file, "", "utf8");
+    writeFileSync(file, `${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`, { encoding: "utf8", flag: "a" });
+  } catch {
+    // Diagnostics must never break a turn.
+  }
+}
+
+export function antigravityMessagesFingerprint(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return {
+    msgsLen: list.length,
+    msgsHash: createHash("sha256").update(JSON.stringify(list)).digest("hex").slice(0, 32),
+  };
+}
+
+/**
+ * Render the pre-existing conversation for the FIRST anchored turn.
+ *
+ * agy has no memory of this session yet, so the whole transcript must travel
+ * once. Unlike the continuation tail it MUST keep role labels: without them the
+ * import is an unlabelled wall of prose in which the model cannot tell its own
+ * previous answers from the user's questions — the "switched to Antigravity and
+ * it ignored the earlier history" report.
+ *
+ * The newest turns always survive; older ones are dropped until the import fits
+ * the same byte budget the replay path uses, so a long foreign-model session
+ * cannot blow the latency budget on the very first Antigravity message.
+ */
+export function antigravityHistoryImport(messages, { capBytes = AGY_PROMPT_HISTORY_BYTE_CAP } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const sections = [];
+  for (const message of list) {
+    const text = contentText(message?.content ?? message?.text);
+    if (!text) continue;
+    const role = String(message?.role ?? "message").toLowerCase();
+    sections.push(`${role}:\n${text}`);
+  }
+  let kept = sections;
+  let drop = 0;
+  while (kept.length > 0 && Buffer.byteLength(kept.join("\n\n"), "utf8") > capBytes && drop < sections.length) {
+    drop += 1;
+    kept = sections.slice(drop);
+  }
+  return kept.join("\n\n");
+}
+
+/**
+ * Flatten the messages newer than the anchored prefix into one user text.
+ * Leading assistant messages are skipped: they are agy's own replies, which
+ * its conversation memory already holds — replaying them would duplicate the
+ * model's own turns inside the anchored conversation.
+ */
+function antigravityTailText(messages, fromLen) {
+  const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
+  // Exactly ONE leading assistant message is agy's own reply to the last
+  // anchored turn; everything after it is new to agy. A loop here would also
+  // swallow foreign-model answers that follow a model switch.
+  if (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+    list.shift();
+  }
+  // A tail that carries foreign-model turns (the user switched away and back)
+  // needs the same role labels as a full import, or the model cannot tell those
+  // answers from the user's own words. A pure new-user tail stays raw.
+  const labelled = list.some((message) => String(message?.role ?? "").toLowerCase() === "assistant");
+  const parts = [];
+  for (const message of list) {
+    const text = contentText(message?.content ?? message?.text);
+    if (!text) continue;
+    parts.push(labelled ? `${String(message?.role ?? "message").toLowerCase()}:\n${text}` : text);
+  }
+  return parts.join("\n\n");
+}
+
+export function antigravityAnchorInvocation({ conversationId = null, text }) {
+  return {
+    args: [
+      ...(conversationId ? ["--conversation", conversationId] : []),
+      "--input-format", "stream-json",
+    ],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: typeof text === "string" ? text : String(text ?? "") },
+    })}\n`,
+  };
+}
+
+/**
+ * DEGRADATION PATH ONLY (design §9.2/P3).
+ *
+ * Everything from here to `antigravityAnchorInvocation` serves the legacy
+ * flattened-replay executor, which the session-anchor path falls back to when
+ * the anchored turn fails twice or no session id is available. Keep it working,
+ * but no new feature should depend on it.
+ *
+ * Prompt budget that still travels as `argv`.
+ *
+ * `execve` caps argv+env at `kern.argmax` (1 MiB on macOS) and, on Linux, caps
+ * a single argv string at `MAX_ARG_STRLEN` (128 KiB). Handing agy the whole
+ * conversation as `-p <prompt>` therefore dies with `spawn E2BIG` as soon as a
+ * session grows past the cap — the failure is raised by the kernel before the
+ * CLI even starts, so it can never be retried away. 64 KiB leaves six times
+ * the headroom for the environment and stays far below the Linux per-string
+ * limit; larger prompts use the CLI's NDJSON stream input on stdin instead.
+ */
+export const AGY_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024;
+
+/**
+ * Resolve how one print-mode turn carries its prompt.
+ *
+ * Short turns keep the exact `-p <prompt>` invocation that has always been
+ * verified against the official CLI. Long turns switch to
+ * `--input-format stream-json` and put the prompt in a single NDJSON `user`
+ * event on stdin, which removes the prompt from argv entirely.
+ */
+export function antigravityPromptInvocation(prompt, {
+  thresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+} = {}) {
+  const text = typeof prompt === "string" ? prompt : String(prompt ?? "");
+  if (Buffer.byteLength(text, "utf8") < thresholdBytes) {
+    return { args: ["-p", text], stdin: null };
+  }
+  return {
+    args: ["--input-format", "stream-json"],
+    // agy's stream decoder expects `message.content` as a PLAIN STRING.
+    // A content-parts array (as used by the native protocol) decodes to an
+    // empty prompt and the CLI then waits forever for a usable user turn —
+    // the hung `agy --input-format stream-json` processes observed in the
+    // wild. Verified against agy 1.2.3 on 2026-09-15.
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: text },
+    })}\n`,
+  };
 }
 
 function usageFromResponse(usage) {
@@ -888,13 +1292,31 @@ function usageFromResponse(usage) {
   const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
   const outputTokens = Number(usage.output_tokens ?? usage.outputTokens);
   if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+  // agy reports thinking separately as `thinking_tokens` and cached input as
+  // `cache_read_tokens`; DSH's TokenUsage keeps uncached input, cached input and
+  // reasoning disjoint, so dropping them made every turn look like it burned
+  // the whole prompt as fresh input.
+  const reasoning = Number(usage.thinking_tokens ?? usage.reasoning_tokens ?? usage.reasoningTokens);
+  const cacheRead = Number(usage.cache_read_tokens ?? usage.cacheReadTokens);
+  const cacheWrite = Number(usage.cache_write_tokens ?? usage.cacheWriteTokens);
   return {
     inputTokens,
     outputTokens,
-    ...(Number.isFinite(Number(usage.reasoning_tokens ?? usage.reasoningTokens))
-      ? { reasoningTokens: Number(usage.reasoning_tokens ?? usage.reasoningTokens) }
-      : {}),
+    ...(Number.isFinite(reasoning) ? { reasoningTokens: reasoning } : {}),
+    ...(Number.isFinite(cacheRead) ? { cacheReadTokens: cacheRead } : {}),
+    ...(Number.isFinite(cacheWrite) ? { cacheWriteTokens: cacheWrite } : {}),
   };
+}
+
+/** Sum two TokenUsage snapshots; agy reports per-step increments. */
+function addUsage(left, right) {
+  if (!right) return left ?? null;
+  if (!left) return { ...right };
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (Number.isFinite(value)) merged[key] = (Number.isFinite(merged[key]) ? merged[key] : 0) + value;
+  }
+  return merged;
 }
 
 function streamEventTexts(payload) {
@@ -951,6 +1373,266 @@ function streamEventResult(payload) {
     usage: result.usage ?? payload.usage,
     status: result.status,
     error: result.error,
+    ...(Array.isArray(result.denied_actions)
+      ? {
+          deniedActions: result.denied_actions
+            .map((entry) => String(entry?.action ?? entry?.name ?? entry?.tool ?? "").trim())
+            .filter((action) => action.length > 0),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Explain a run that ended with no text at all.
+ *
+ * Antigravity print mode auto-denies any tool that needs a permission prompt it
+ * cannot show, then exits 0 with an empty response. Without this the harness
+ * only sees "provider stream ended without substantive output" and retries a
+ * deterministic failure. Codes here are deliberately outside the retryable set
+ * so the turn fails once, with the reason.
+ */
+function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
+  const denied = [...new Set(deniedActions)];
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 600) : "";
+  if (denied.length === 0 && hint.length === 0) return null;
+  const message = denied.length > 0
+    ? `Antigravity CLI 未产生任何输出：需要授权的工具被自动拒绝（${denied.join(", ")}）。print/headless 模式无法弹出授权提示，请改用 DSH 已注册的同类工具重试，或在 agy 的 settings.json 中通过 permissions.allow 放行。`
+    : `Antigravity CLI 未产生任何输出：${hint}`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = hint || null;
+  return error;
+}
+
+/**
+ * Explain a run that produced neither text nor a forwarded tool call and left
+ * no other trace.
+ *
+ * Returning such a turn as a plain empty message makes the harness classify it
+ * as EMPTY_RESPONSE and replay the whole ~85k-token prompt up to five times
+ * through five fresh CLI processes — the most expensive failure mode observed
+ * in production. Every empty turn therefore fails once, non-retryably, with the
+ * evidence this run actually collected.
+ */
+function antigravitySilentRunError({ stderr = "", events = 0, steps = 0, toolErrors = [], resultStatus = null } = {}) {
+  const errorMessages = [...new Set(toolErrors)].slice(0, 3).join("；");
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+  const observed = [
+    `解析到 ${events} 个事件、${steps} 个步骤`,
+    resultStatus ? `result.status=${resultStatus}` : "没有 result 事件",
+  ].join("，");
+  const detail = errorMessages || hint || null;
+  const message = detail
+    ? `Antigravity CLI 本轮没有产生任何可见文本（${observed}）：${detail}。为避免重复消耗额度，本轮不会自动重试；请重发一次，或换用其它模型。`
+    : `Antigravity CLI 本轮没有产生任何可见文本，也没有工具调用（${observed}）。这通常是上游偶发空回合；为避免重复消耗额度，本轮不会自动重试，请重发一次。`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = detail;
+  return error;
+}
+
+/**
+ * Antigravity CLI tool name → the DSH tool exposing the same capability.
+ *
+ * Print mode cannot open an interactive permission prompt, so a CLI tool the
+ * user has not allow-listed is auto-denied and the run ends with an empty
+ * response. Forwarding the intent to a DSH tool the request already declares
+ * keeps the DSH tool loop in charge of execution and permissions, which is the
+ * whole point of running the CLI behind the harness. Only tools DSH already
+ * registered are ever returned, so this map grants no new authority.
+ */
+const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
+  run_command: "bash",
+  read_url_content: "web_fetch",
+  search_web: "web_search",
+});
+
+/**
+ * Detect a TUN proxy that answers every DNS query with a reserved address
+ * (Clash / Surge / TomatoCloud "fake-IP" or enhanced mode).
+ *
+ * Such proxies still route those addresses correctly — the connection is
+ * intercepted and tunnelled to the real host — but DSH's `web_fetch` resolves
+ * the hostname first and refuses any non-public answer as an SSRF risk, so with
+ * fake-IP DNS *every* fetch fails before a socket is opened. The probe asks for
+ * a hostname that is public by definition and treats an all-reserved answer set
+ * as "this resolver is virtualized"; a failure to resolve is not evidence.
+ */
+const FAKE_IP_PROBE_HOST = "example.com";
+const FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1000;
+const fakeIpCache = new Map();
+
+function ipv4ToInt(address) {
+  const parts = String(address).split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = ((value << 8) + octet) >>> 0;
+  }
+  return value;
+}
+
+/** Reserved/private IPv4 blocks, including the 198.18.0.0/15 fake-IP range. */
+const RESERVED_V4_BLOCKS = Object.freeze([
+  [0x00000000, 0xff000000], // 0.0.0.0/8
+  [0x0a000000, 0xff000000], // 10.0.0.0/8
+  [0x64400000, 0xffc00000], // 100.64.0.0/10 (CGNAT, Tailscale)
+  [0x7f000000, 0xff000000], // 127.0.0.0/8
+  [0xa9fe0000, 0xffff0000], // 169.254.0.0/16
+  [0xac100000, 0xfff00000], // 172.16.0.0/12
+  [0xc0a80000, 0xffff0000], // 192.168.0.0/16
+  [0xc6120000, 0xfffe0000], // 198.18.0.0/15 (benchmarking / fake-IP)
+]);
+
+function isReservedAddress(address) {
+  const value = ipv4ToInt(address);
+  // Bitwise AND yields a signed 32-bit result; normalize before comparing.
+  if (value !== null) return RESERVED_V4_BLOCKS.some(([base, mask]) => ((value & mask) >>> 0) === base);
+  const normalized = String(address).trim().toLowerCase();
+  if (normalized === "::" || normalized === "::1") return true;
+  return normalized.startsWith("fe80:") || normalized.startsWith("fc") || normalized.startsWith("fd");
+}
+
+/**
+ * Report whether the local resolver is virtualized by a fake-IP proxy.
+ *
+ * @param {object} [options] - test seams and cache control.
+ * @returns {Promise<boolean>} true when a known-public host resolved to reserved addresses only.
+ */
+export async function detectFakeIpEnvironment({ host = FAKE_IP_PROBE_HOST, resolver = lookup, now = () => Date.now(), useCache = true } = {}) {
+  const cached = fakeIpCache.get(host);
+  if (useCache && cached !== undefined && now() - cached.at < FAKE_IP_CACHE_TTL_MS) return cached.value;
+  let value = false;
+  try {
+    const answers = await resolver(host, { all: true, order: "verbatim" });
+    value = Array.isArray(answers) && answers.length > 0 && answers.every((entry) => isReservedAddress(entry?.address));
+  } catch {
+    // Resolution failure is not evidence of a virtualized resolver.
+    value = false;
+  }
+  fakeIpCache.set(host, { at: now(), value });
+  return value;
+}
+
+/** Quote one shell argument with single quotes, escaping embedded quotes. */
+function shellQuote(value) {
+  return `'${String(value).split("'").join("'\\''")}'`;
+}
+
+/** Marker that identifies this adapter's own local-fetch calls in the history. */
+const LOCAL_FETCH_DESCRIPTION = "through the local network stack";
+
+/**
+ * Readable-text extractor for the local fetch: drops non-JSON-LD scripts,
+ * styles and comments before stripping tags, so the model receives page copy
+ * instead of minified JavaScript (which made it re-fetch the same URL).
+ */
+const LOCAL_FETCH_EXTRACTOR = [
+  "let s=\"\";process.stdin.setEncoding(\"utf8\");",
+  "process.stdin.on(\"data\",d=>s+=d);",
+  "process.stdin.on(\"end\",()=>{",
+  "const ent={\"&nbsp;\":\" \",\"&amp;\":\"&\",\"&lt;\":\"<\",\"&gt;\":\">\",\"&quot;\":String.fromCharCode(34),\"&#39;\":String.fromCharCode(39)};",
+  "s=s.replace(/<script\\b(?![^>]*application\\/ld\\+json)[^>]*>[\\s\\S]*?<\\/script>/gi,\" \")",
+  ".replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi,\" \")",
+  ".replace(/<!--[\\s\\S]*?-->/g,\" \")",
+  ".replace(/<[^>]*>/g,\" \")",
+  ".replace(/&(nbsp|amp|lt|gt|quot|#39);/g,m=>ent[m]||\" \")",
+  ".replace(/[ \\t\\r\\f\\v]+/g,\" \")",
+  ".replace(/\\n[ \\t]*/g,\"\\n\")",
+  ".replace(/\\n{3,}/g,\"\\n\\n\");",
+  "process.stdout.write(s.trim().slice(0,40000)+\"\\n\")});",
+].join("");
+
+/**
+ * Read a URL through the machine's own network stack.
+ *
+ * The fake-IP environment described above only breaks DSH's hostname check —
+ * `curl` reaches the same page fine, because the TUN proxy intercepts the
+ * reserved address and tunnels the connection. This keeps the read auditable
+ * (it is an ordinary `bash` tool call in the session) and grants no capability
+ * the request's own tool list did not already carry.
+ *
+ * `--retry` covers the transient TLS/socket resets a TUN proxy produces; the
+ * Node extractor is expected on any machine running this plugin, with a plain
+ * tag-stripping `sed` fallback when `node` is not on PATH.
+ */
+function antigravityLocalFetchCommand(url) {
+  return [
+    `curl -sSL --retry 2 --retry-connrefused --retry-delay 1 --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)}`,
+    `| { if command -v node >/dev/null 2>&1; then node -e ${shellQuote(LOCAL_FETCH_EXTRACTOR)}; else sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '; fi; }`,
+  ].join(" ");
+}
+
+function antigravityToolCallId(update, request) {
+  return String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`);
+}
+
+function antigravityLocalFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: antigravityLocalFetchCommand(url),
+      description: `Fetch ${url} ${LOCAL_FETCH_DESCRIPTION}`,
+    },
+    id: antigravityToolCallId(update, request),
+  };
+}
+
+/** Join the text of one tool-result block. */
+function toolResultText(block) {
+  const content = Array.isArray(block?.content) ? block.content : [];
+  return content.map((entry) => (typeof entry?.text === "string" ? entry.text : "")).join("");
+}
+
+/**
+ * Whether this conversation already holds a *successful* local fetch of `url`.
+ *
+ * Matching the tool result by call id keeps a failed attempt (transient TLS
+ * reset, HTTP error, empty body) from suppressing the retry the model needs.
+ */
+function urlAlreadyFetchedLocally(request, url) {
+  const messages = Array.isArray(request?.messages) ? request.messages : [];
+  const commands = new Map();
+  const outputs = new Map();
+  for (const message of messages) {
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const block of content) {
+      if (block?.type === "tool-call" && typeof block.id === "string") {
+        commands.set(block.id, typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? ""));
+      } else if (block?.type === "tool-result" && typeof block.toolCallId === "string") {
+        outputs.set(block.toolCallId, toolResultText(block));
+      }
+    }
+  }
+  for (const [id, args] of commands) {
+    if (!args.includes(url) || !args.includes(LOCAL_FETCH_DESCRIPTION)) continue;
+    const output = outputs.get(id);
+    if (typeof output !== "string") continue;
+    const text = output.trim();
+    if (text.length < 200) continue;
+    if (/^\[stderr\]/.test(text) || /\bcurl: \(\d+\)/.test(text)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Cheap stand-in for a fetch whose content is already in the conversation.
+ * Re-running the request costs a network round trip and returns byte-identical
+ * text, so the model is told to work from what it already has.
+ */
+function antigravityRepeatFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: `echo ${shellQuote(`URL ${url} was already fetched in this conversation; its text is in the matching tool result above. Use it instead of fetching again.`)}`,
+      description: `Reuse the fetched content of ${url} instead of re-fetching it`,
+    },
+    id: antigravityToolCallId(update, request),
   };
 }
 
@@ -958,17 +1640,15 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  // Antigravity calls its command tool `run_command`; DSH presents the same
-  // capability as `bash`. Keep this translation at the protocol boundary so
-  // the actual DSH tool registry remains the source of truth.
-  if (providerToolName === "run_command") {
-    const bash = tools.find((tool) => tool?.name === "bash");
-    if (bash) return { name: bash.name, definition: bash };
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  if (translated) {
+    const target = tools.find((tool) => tool?.name === translated);
+    if (target) return { name: target.name, definition: target };
   }
   return null;
 }
 
-function toolCallFromEvent(payload, request) {
+function toolCallFromEvent(payload, request, options = {}) {
   const update = payload?.step_update;
   if (!update || String(update.state ?? "").toUpperCase() !== "ACTIVE" || update.step_type !== "tool") return null;
   const providerName = String(update.tool_name ?? update.tool_info?.name ?? "");
@@ -984,10 +1664,49 @@ function toolCallFromEvent(payload, request) {
         name: target.name,
         arguments: {
           command,
-          description: parameters.description ?? parameters.Description ?? "Run the requested command",
+          // agy's run_command never carries a description; show a command
+          // snippet instead of the opaque "Run the requested command" so the
+          // UI reflects what each forwarded call actually does.
+          description: parameters.description ?? parameters.Description
+            ?? `运行：${command.replace(/\s+/g, " ").trim().slice(0, 80)}`,
           ...(parameters.workdir ?? parameters.Cwd ? { workdir: parameters.workdir ?? parameters.Cwd } : {}),
           ...(parameters.timeoutMs ?? parameters.TimeoutMs ? { timeoutMs: parameters.timeoutMs ?? parameters.TimeoutMs } : {}),
         },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+      };
+    }
+  }
+  // The CLI reads a URL under `read_url_content` with a capitalized `Url`
+  // parameter; DSH's `web_fetch` takes `url`.
+  if (providerName === "read_url_content" && target.name === "web_fetch") {
+    const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
+    if (typeof url === "string" && url.length > 0) {
+      if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
+        if (urlAlreadyFetchedLocally(request, url)) {
+          return antigravityRepeatFetchToolCall(url, update, request);
+        }
+        return antigravityLocalFetchToolCall(url, update, request);
+      }
+      return {
+        name: target.name,
+        arguments: { url },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
+      };
+    }
+  }
+  // The CLI searches with a single `query` string; DSH's `web_search` takes a
+  // required `queries` array (1–4 entries).
+  if (providerName === "search_web" && target.name === "web_search") {
+    const query = parameters.query ?? parameters.Query ?? parameters.q;
+    const queries = Array.isArray(parameters.queries)
+      ? parameters.queries
+      : typeof query === "string" && query.trim().length > 0
+        ? [query.trim()]
+        : [];
+    if (queries.length > 0) {
+      return {
+        name: target.name,
+        arguments: { queries },
         id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`),
       };
     }
@@ -1007,16 +1726,70 @@ function appendDelta(current, next) {
   return next;
 }
 
+/** Character shingles, whitespace-insensitive: box reflows must not defeat dedup. */
+function shingles(text, size = 6) {
+  const normalized = String(text ?? "").replace(/\s+/g, "");
+  const set = new Set();
+  for (let i = 0; i + size <= normalized.length; i += 1) set.add(normalized.slice(i, i + size));
+  return set;
+}
+
+/**
+ * How much of `candidate` is already covered by `emitted` (0..1).
+ *
+ * agy's final `result.response` can contain the whole answer a second time —
+ * re-rendered, so it is not a clean prefix extension (observed: 3469 + 3605
+ * chars whose two copies differ only in ASCII box widths, which our append-only
+ * delta handler dutifully appended as if it were new content). Containment on
+ * whitespace-insensitive shingles catches that reflow without suppressing
+ * genuinely new text.
+ */
+export function antigravityRepeatRatio(emitted, candidate) {
+  if (!candidate) return 0;
+  const candidateShingles = shingles(candidate);
+  if (candidateShingles.size === 0) return 0;
+  const emittedShingles = shingles(emitted);
+  if (emittedShingles.size === 0) return 0;
+  let shared = 0;
+  for (const shingle of candidateShingles) {
+    if (emittedShingles.has(shingle)) shared += 1;
+  }
+  return shared / candidateShingles.size;
+}
+
+/** Minimum length before repeat suppression may apply, so short prose is safe. */
+export const AGY_REPEAT_MIN_CHARS = 200;
+export const AGY_REPEAT_RATIO = 0.8;
+
 /** Execute text turns through the installed official Antigravity CLI. */
 export function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
-  timeoutMs = 300_000,
+  // One print-mode turn carries the whole conversation and can legitimately run
+  // for minutes on a large context (measured: a trivial prompt already costs
+  // ~35s on gemini-3.8-flash-high). The CLI's own --print-timeout defaults to
+  // 5m, which killed healthy turns mid-flight and forced a full replay retry —
+  // doubling the cost of every slow turn. Widen both boundaries: agy aborts
+  // first with its own error, DSH kills a minute later as the outer guard.
+  printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
+  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 960_000,
+  // Sideband turns (titles/summaries) are short and must not occupy the fast
+  // path with a full-length budget; a short ceiling fails them cheaply.
+  sidebandTimeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_SIDEBAND_TIMEOUT_MS) || 120_000,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
+  detectFakeIp = detectFakeIpEnvironment,
+  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+  conversationStore = null,
+  anchorLogPath = null,
+  settingsFile = null,
+  mirrorPermissions = env?.DOCKYARD_ANTIGRAVITY_MIRROR_PERMISSIONS !== "0",
+  // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
+  // to the legacy replay path on any anchored failure, so default-on is safe.
+  sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0",
 } = {}) {
-  return async function executeAntigravity({ request = {} } = {}) {
+  return async function executeAntigravity({ request = {}, context = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
       throw unsupportedContentError(
         PROVIDER_ID,
@@ -1028,8 +1801,26 @@ export function createAntigravityCliExecutor({
       model: request.model,
       reasoningEffort: request.reasoningEffort,
     });
-    return (async function* responseStream() {
-      const args = ["-p", antigravityRequestPrompt(request)];
+    // A virtualized (fake-IP) resolver makes DSH's guarded web_fetch unusable
+    // for every hostname; read URLs through the local network stack instead.
+    const preferLocalUrlFetch = await Promise.resolve()
+      .then(() => detectFakeIp())
+      .then((value) => value === true)
+      .catch(() => false);
+    // Keep agy's allow list at least as permissive as the DSH side before any
+    // spawn: a denied tool call ends the run with an empty response and forces
+    // the slow replay path.
+    ensureAntigravityPermissionMirror({
+      file: settingsFile ?? antigravitySettingsFile(env),
+      enabled: mirrorPermissions,
+    });
+    const sideband = isAntigravitySidebandRequest(request);
+    const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
+    const legacyStream = async function* () {
+      const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
+        thresholdBytes: promptStdinThresholdBytes,
+      });
+      const args = [...invocation.args];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
         args.push("--model", resolved.model);
       }
@@ -1039,19 +1830,56 @@ export function createAntigravityCliExecutor({
       // Print mode cannot open an interactive permission prompt. The sandbox
       // makes a native tool request deterministic; we translate its intent
       // into DSH's own tool loop before the CLI reaches its denial boundary.
-      args.push("--sandbox", "--output-format", "stream-json");
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text = "";
       let usage = null;
+      // Per-step usage is incremental while the final `result.usage` is
+      // cumulative; keep a running sum so a turn that ends on a forwarded tool
+      // call still reports what it actually consumed.
+      let stepUsage = null;
       const handledTools = new Set();
+      // Print mode explains itself on stderr (e.g. an auto-denied tool) and then
+      // exits 0 with an empty response; keep a bounded copy for the diagnosis.
+      const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 2_000) diagnostics.stderr += String(chunk);
+        },
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
-        const tool = toolCallFromEvent(parsed, request);
+        diagnostics.events += 1;
+        // Newer CLI builds report an auto-denied tool as a step_update ERROR
+        // (result still comes back SUCCESS with an empty response and no
+        // denied_actions), so harvest the denial here or the run looks like a
+        // bare empty response and the harness retries a deterministic failure.
+        const deniedUpdate = parsed?.step_update;
+        if (deniedUpdate && deniedUpdate.step_type === "tool" && String(deniedUpdate.state ?? "").toUpperCase() === "ERROR") {
+          const failureText = String(deniedUpdate.tool_info?.error?.message ?? "").trim();
+          if (failureText) diagnostics.toolErrors.push(failureText);
+          if (/permission/i.test(failureText)) {
+            // The CLI's message names the missing grant itself, e.g.
+            // `user denied permission for read_file(/private/tmp/x.txt)`. Keep
+            // that path: "read_file" alone does not tell the user which
+            // allow-rule to add, and /tmp resolves under /private on macOS.
+            const grant = /denied permission for (.+?)\)\s*$/.exec(failureText)?.[1];
+            const deniedName = String(deniedUpdate.tool_name ?? deniedUpdate.tool_info?.name ?? "").trim();
+            const label = grant ? `${grant})` : deniedName;
+            if (label) diagnostics.deniedActions.push(label);
+          }
+        }
+        // Any state transition away from ACTIVE means the CLI reached a real
+        // step boundary, which is the cheapest signal that the run was alive.
+        if (deniedUpdate && String(deniedUpdate.state ?? "").toUpperCase() !== "ACTIVE") {
+          diagnostics.steps += 1;
+          stepUsage = addUsage(stepUsage, usageFromResponse(deniedUpdate.usage));
+        }
+        const tool = toolCallFromEvent(parsed, request, { preferLocalUrlFetch });
         if (tool) {
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
           if (handledTools.has(key)) continue;
@@ -1068,6 +1896,11 @@ export function createAntigravityCliExecutor({
               arguments: JSON.stringify(tool.arguments),
             },
           };
+          // Token accounting must not depend on how the turn ended: a tool
+          // round trip still consumed the prompt, and dropping its usage made
+          // the ledger under-report every tool-heavy conversation.
+          const reported = usage ?? stepUsage;
+          if (reported) yield { type: "usage", usage: reported };
           yield { type: "finish", reason: { kind: "tool-calls" } };
           return;
         }
@@ -1079,12 +1912,188 @@ export function createAntigravityCliExecutor({
         }
         const final = streamEventResult(parsed);
         if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
           if (final.status && final.status !== "SUCCESS") {
-            const error = new Error("Antigravity CLI request did not complete");
-            error.detail = final.error ?? final.text ?? null;
-            throw error;
+            const detail = typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "");
+            // Same rule as the anchored path: never discard text the user can
+            // already see when the upstream drops the stream mid-answer.
+            if (text.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail || final.text || null;
+              throw error;
+            }
+            const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            text += note;
+            yield { type: "text-delta", index: 0, text: note };
           }
-          const next = appendDelta(text, final.text);
+          let next = appendDelta(text, final.text);
+          // The CLI re-renders the answer into its final response often enough
+          // that appending the "remainder" duplicates the whole reply. Drop it
+          // when it is already covered by what we streamed.
+          if (next
+            && next.length >= AGY_REPEAT_MIN_CHARS
+            && antigravityRepeatRatio(text, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
+          if (next) {
+            text += next;
+            yield { type: "text-delta", index: 0, text: next };
+          }
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = final.deniedActions;
+          }
+          usage = usageFromResponse(final.usage) ?? usage;
+        }
+        usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      // Whitespace-only text is not visible content downstream either, so it
+      // must take the same single-failure path as a fully empty run.
+      if (text.trim().length === 0) {
+        // A cancelled turn is not a provider failure: report the abort instead
+        // of an empty response, which the harness would otherwise replay.
+        if (request.signal?.aborted) {
+          const aborted = new Error("Antigravity CLI run was cancelled");
+          aborted.name = "AbortError";
+          throw aborted;
+        }
+        // Nothing visible was produced: surface the CLI's own explanation
+        // instead of letting the harness report a bare empty response (and
+        // retry a deterministic failure).
+        const emptyOutput = antigravityEmptyOutputError(diagnostics);
+        if (emptyOutput) throw emptyOutput;
+        throw antigravitySilentRunError(diagnostics);
+      }
+      yield { type: "block-end", index: 0, block: { type: "text", text } };
+      const finalUsage = usage ?? stepUsage;
+      if (finalUsage) yield { type: "usage", usage: finalUsage };
+      yield { type: "finish", reason: { kind: "stop" } };
+    };
+
+    // --- Session-anchor path ---------------------------------------------
+    // The harness passes the conversation handle in the invoke CONTEXT
+    // (runtime.stream(provider, request, { sessionId })); some callers also
+    // spread it onto the request. Accept both or the anchor never engages.
+    const rawSessionId = request.sessionId ?? context.sessionId;
+    const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0
+      ? rawSessionId
+      : null;
+    if (!sessionAnchor || !sessionKey || sideband) {
+      if (sideband && (typeof request.purpose === "string" || isAntigravitySidebandRequest(request))) {
+        appendAntigravityAnchorLog(
+          anchorLogPath ?? join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log"),
+          { kind: "sideband_bypass", sessionKey, purpose: typeof request.purpose === "string" ? request.purpose : "(system-marker)" },
+        );
+      }
+      return legacyStream();
+    }
+
+    const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const record = store.get(sessionKey);
+    const continuation = Boolean(
+      record
+      && Number.isInteger(record.msgsLen)
+      && record.msgsLen <= messages.length
+      && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash,
+    );
+    // On the first anchored turn the whole prior conversation (possibly written
+    // by another model) must be imported once, with role labels so the model can
+    // tell answers from questions. Later turns only need the new content, since
+    // agy already holds everything before the anchored prefix.
+    const tail = continuation
+      ? antigravityTailText(messages, record.msgsLen)
+      : `以下是本会话此前的对话历史（由其它模型产生），请把它当作你自己的上下文继续：\n\n${antigravityHistoryImport(messages)}`;
+    const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0
+      ? `会话约定（长期有效）：\n${request.system}\n\n`
+      : "";
+    const anchorText = `${conversationIntro}${tail}`;
+    if (!anchorText.trim()) return legacyStream();
+
+    const anchorLogFile = anchorLogPath ?? join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log");
+    const anchoredStream = async function* () {
+      const cid = continuation ? record.cid : null;
+      const diagnostics = { events: 0, steps: 0, resultStatus: null, deniedActions: [], stderr: "" };
+      const startedAt = Date.now();
+      const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
+      const args = [...invocation.args];
+      if (typeof resolved.model === "string" && resolved.model.length > 0) {
+        args.push("--model", resolved.model);
+      }
+      if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
+        args.push("--effort", resolved.reasoningEffort);
+      }
+      // agy owns tool execution in this mode (design §4.2/§8): the sandbox and
+      // its own permission settings govern commands, so tool step_updates are
+      // never forwarded into the DSH tool loop.
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      let text = "";
+      let usage = null;
+      let seenConversationId = null;
+      for await (const line of streamCommandRunner(cliPath, args, {
+        env,
+        timeoutMs,
+        signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 1_000) diagnostics.stderr += String(chunk);
+        },
+      })) {
+        const parsed = parseJsonOutput(line);
+        if (!parsed) continue;
+        diagnostics.events += 1;
+        const stepUpdate = parsed?.step_update;
+        if (stepUpdate) {
+          diagnostics.steps += 1;
+          if (stepUpdate.step_type === "tool" && String(stepUpdate.state ?? "").toUpperCase() === "ERROR") {
+            diagnostics.steps += 0;
+            diagnostics.deniedActions.push(String(stepUpdate.tool_info?.error?.message ?? stepUpdate.tool_name ?? "").slice(0, 200));
+          }
+        }
+        seenConversationId = seenConversationId
+          ?? parsed.conversation_id
+          ?? parsed.result?.conversation_id
+          ?? parsed.step_update?.conversation_id
+          ?? null;
+        for (const delta of streamEventTexts(parsed)) {
+          const next = appendDelta(text, delta);
+          if (!next) continue;
+          text += next;
+          yield { type: "text-delta", index: 0, text: next };
+        }
+        const final = streamEventResult(parsed);
+        if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
+          }
+          if (final.status && final.status !== "SUCCESS") {
+            const detail = `${typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "")} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text.length, detail: detail.slice(0, 300) });
+            // A run that already produced visible text must not be discarded:
+            // the upstream can drop the stream (observed: streamGenerateContent
+            // "EOF") after most of the answer has been generated. Keep what the
+            // user can see and say why the run ended.
+            if (text.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail;
+              throw error;
+            }
+            const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            text += note;
+            yield { type: "text-delta", index: 0, text: note };
+          }
+          let next = appendDelta(text, final.text);
+          // The CLI re-renders the answer into its final response often enough
+          // that appending the "remainder" duplicates the whole reply. Drop it
+          // when it is already covered by what we streamed.
+          if (next
+            && next.length >= AGY_REPEAT_MIN_CHARS
+            && antigravityRepeatRatio(text, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
           if (next) {
             text += next;
             yield { type: "text-delta", index: 0, text: next };
@@ -1093,9 +2102,62 @@ export function createAntigravityCliExecutor({
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
+      if (text.trim().length === 0 || request.signal?.aborted) {
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchored_empty", sessionKey, cid, diagnostics, textLen: text.length,
+          aborted: Boolean(request.signal?.aborted), elapsedMs: Date.now() - startedAt,
+        });
+        // Degrade: without visible output the replay path either succeeds with
+        // its richer diagnostics or surfaces the proper Chinese error.
+        const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
+        if (request.signal?.aborted) error.name = "AbortError";
+        throw error;
+      }
+      appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_ok", sessionKey, cid, diagnostics, textLen: text.length, elapsedMs: Date.now() - startedAt });
+      if (seenConversationId) {
+        store.set(sessionKey, {
+          cid: seenConversationId,
+          msgsLen: messages.length,
+          msgsHash: antigravityMessagesFingerprint(messages).msgsHash,
+          model: resolved.model ?? null,
+        });
+      }
       yield { type: "block-end", index: 0, block: { type: "text", text } };
       if (usage) yield { type: "usage", usage };
       yield { type: "finish", reason: { kind: "stop" } };
+    };
+
+    return (async function* () {
+      let yielded = false;
+      let lastError = null;
+      // An empty anchored run is usually an upstream hiccup (observed in the
+      // wild: a 10-event SUCCESS with empty text, ~14s). Retrying the anchor
+      // costs one cheap extra spawn and keeps the fast path; only a second
+      // failure pays for a full replay.
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          for await (const chunk of anchoredStream()) {
+            // A bare block-start carries no user-visible content: losing it to a
+            // replay retry is free, losing real text would duplicate it.
+            if (chunk.type !== "block-start") yielded = true;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          // A turn that already streamed content cannot be replayed without
+          // duplicating it; aborts and partial turns propagate as-is.
+          if (yielded || error?.name === "AbortError") throw error;
+          appendAntigravityAnchorLog(anchorLogFile, {
+            kind: "anchor_attempt_failed", sessionKey, attempt,
+            reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
+          });
+        }
+      }
+      appendAntigravityAnchorLog(anchorLogFile, {
+        kind: "anchor_degraded", sessionKey, yielded, reason: String(lastError?.code ?? lastError?.message ?? lastError).slice(0, 200),
+      });
+      yield* legacyStream();
     })();
   };
 }
@@ -1863,6 +2925,9 @@ export class AntigravityOfficialSessionDriver {
       if (credentialRef && typeof context.secretStore?.write === "function") {
         await context.secretStore.write(credentialRef, nextCredential);
       }
+      // The Keychain now holds the rotated session, so the cached copy must go:
+      // a stale read would fail the fingerprint check on the very next turn.
+      invalidateAntigravityKeychainCache();
       return { session: refreshed, credential: nextCredential, rotated: true };
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -1933,6 +2998,7 @@ export class AntigravityOfficialSessionDriver {
       if (!accessChanged && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
+      invalidateAntigravityKeychainCache();
       return next;
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -2103,6 +3169,8 @@ export class AntigravityOfficialSessionDriver {
     if (!session) throw new Error("Antigravity candidate is no longer available; scan again");
     if (!context.secretStore) throw new Error("A secure credential store is required");
     await context.secretStore.write(value.credentialRef, session);
+    // A newly imported account makes any cached Keychain read ambiguous.
+    invalidateAntigravityKeychainCache();
     return {
       providerId: PROVIDER_ID,
       accountId: value.accountId,

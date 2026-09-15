@@ -170,7 +170,7 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync as existsSync2, readFileSync as readFileSync3 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // packages/core/src/errors.mjs
@@ -1291,9 +1291,16 @@ function harnessFailureCode(error) {
   return null;
 }
 function attachHarnessFailure(error) {
-  if (!error || typeof error !== "object" || error.failure !== void 0) return error;
+  if (!error || typeof error !== "object") return error;
   const code = harnessFailureCode(error);
   if (!code) return error;
+  if (error.code === void 0 || error.code === null) {
+    try {
+      error.code = code;
+    } catch {
+    }
+  }
+  if (error.failure !== void 0) return error;
   let message = typeof error.message === "string" && error.message.length > 0 ? error.message : "provider request failed";
   message = message.replace(/\s+/g, " ").trim().slice(0, 500);
   const numericStatus2 = Number(error.upstreamStatus ?? error.status);
@@ -1322,11 +1329,9 @@ var PROVIDER_RETRY_POLICY = Object.freeze({
     "TIMEOUT",
     "TRANSPORT"
   ]),
-  backoff: Object.freeze({
-    initialDelayMs: 1e3,
-    maxDelayMs: 3e4,
-    jitterRatio: 0.2
-  })
+  initialDelayMs: 1e3,
+  maxDelayMs: 3e4,
+  jitterRatio: 0.2
 });
 function effortName(id) {
   return String(id).replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
@@ -3663,10 +3668,13 @@ function createCodexModule({ driver = {} } = {}) {
 
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { copyFileSync, existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
+import { createInterface } from "node:readline";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
@@ -3825,12 +3833,33 @@ function runCliCommand(command, args, {
     });
   });
 }
+function contentHasImage(value) {
+  if (Array.isArray(value)) return value.some((item) => contentHasImage(item));
+  if (!value || typeof value !== "object") return false;
+  if (value.type === "image") return true;
+  return Object.values(value).some((item) => contentHasImage(item));
+}
+function contentHasImageInCurrentTurn(request = {}) {
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  if (messages.length > 0) {
+    const current = messages.at(-1)?.role === "user" ? messages.at(-1) : [...messages].reverse().find((message) => message?.role === "user") ?? messages.at(-1);
+    return contentHasImage(current?.content ?? current?.text);
+  }
+  return contentHasImage(request.input);
+}
+function unsupportedContentError2(providerId, detail) {
+  const error = new Error(detail ?? `${providerId ?? "provider"} does not support this content through its native transport`);
+  error.code = "UNSUPPORTED_CONTENT";
+  error.providerId = providerId ?? null;
+  return error;
+}
 var cliAgentTransportConstants = Object.freeze({
   defaultOutputFormat: "stream-json"
 });
 
 // modules/provider-antigravity/src/native-transport.mjs
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash as createHash4 } from "node:crypto";
 import { homedir as homedir3 } from "node:os";
 import { join as join5 } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -4006,10 +4035,21 @@ async function readBoundedResponseText(response, limit = MAX_ERROR_BODY_BYTES) {
   const raw = typeof response?.text === "function" ? await response.text() : "";
   return String(raw ?? "").slice(0, limit);
 }
+function isPreResponseTransientNetworkError(error) {
+  if (!error) return false;
+  if (error.name === "AbortError") return false;
+  if (error.providerId && !error.networkError) return false;
+  const message = `${error.message ?? ""} ${error.cause?.message ?? ""}`.toLowerCase();
+  const code = String(error.code ?? error.cause?.code ?? "").toUpperCase();
+  return error instanceof TypeError || error.name === "TypeError" || message.includes("fetch failed") || message.includes("network request failed") || message.includes("econnreset") || message.includes("socket hang up") || message.includes("connection reset") || message.includes("other side closed") || message.includes("premature close") || message.includes("und_err_") || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE" || code === "ECONNREFUSED" || code === "UND_ERR_SOCKET" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT";
+}
+var DEFAULT_FETCH_RETRY_DELAYS_MS = Object.freeze([250, 600]);
 async function fetchNativeResponse(url, init = {}, {
   providerId,
   timeoutMs = 3e5,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  maxRetries = 2,
+  retryDelaysMs = DEFAULT_FETCH_RETRY_DELAYS_MS
 } = {}) {
   const controller = new AbortController();
   let timedOut = false;
@@ -4036,37 +4076,54 @@ async function fetchNativeResponse(url, init = {}, {
     if (upstreamSignal.aborted) abort();
     else upstreamSignal.addEventListener("abort", abort, { once: true });
   }
-  try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    if (response.ok === false || response.status !== void 0 && response.status >= 400) {
-      let body = null;
-      try {
-        body = await readBoundedResponseText(response);
-      } catch {
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await fetchImpl(url, { ...init, signal: controller.signal });
+      if (response.ok === false || response.status !== void 0 && response.status >= 400) {
+        let body = null;
+        try {
+          body = await readBoundedResponseText(response);
+        } catch {
+        }
+        const details = errorDetails(body);
+        throw nativeProviderError(providerId, details.message, {
+          status: response.status,
+          body,
+          code: details.code
+        });
       }
-      const details = errorDetails(body);
-      throw nativeProviderError(providerId, details.message, {
-        status: response.status,
-        body,
-        code: details.code
-      });
+      nativeResponseControls.set(response, control);
+      handedOff = true;
+      return response;
+    } catch (error) {
+      if (error?.name === "AbortError" && timedOut && !error.providerId) {
+        if (!handedOff) cleanup();
+        throw timeoutError;
+      }
+      if (upstreamSignal?.aborted) {
+        if (!handedOff) cleanup();
+        throw error;
+      }
+      if (attempt < maxRetries && !timedOut && isPreResponseTransientNetworkError(error)) {
+        const delayMs = retryDelaysMs[attempt] ?? 500;
+        attempt += 1;
+        await new Promise((resolve2) => setTimeout(resolve2, delayMs));
+        if (upstreamSignal?.aborted || timedOut) {
+          if (!handedOff) cleanup();
+          throw timedOut ? timeoutError : error;
+        }
+        continue;
+      }
+      if (!handedOff) cleanup();
+      if (!error?.providerId && error?.name !== "AbortError") {
+        const wrapped = nativeProviderError(providerId, error?.message || "network request failed");
+        if (error !== void 0 && error !== null) wrapped.cause = error;
+        wrapped.networkError = true;
+        throw wrapped;
+      }
+      throw error;
     }
-    nativeResponseControls.set(response, control);
-    handedOff = true;
-    return response;
-  } catch (error) {
-    if (error?.name === "AbortError" && timedOut && !error.providerId) {
-      throw timeoutError;
-    }
-    if (!error?.providerId && error?.name !== "AbortError") {
-      const wrapped = nativeProviderError(providerId, error?.message || "network request failed");
-      if (error !== void 0 && error !== null) wrapped.cause = error;
-      wrapped.networkError = true;
-      throw wrapped;
-    }
-    throw error;
-  } finally {
-    if (!handedOff) cleanup();
   }
 }
 function cleanupNativeResponse(response) {
@@ -4217,7 +4274,9 @@ async function* readSseEvents(response) {
     if (error?.code === "SSE_PROTOCOL_ERROR") throw error;
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     if (!error?.providerId && error?.name !== "AbortError") {
-      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion");
+      const wrapped = nativeProviderError(control?.providerId ?? "provider", error?.message || "stream was interrupted before completion", {
+        code: "TRANSPORT"
+      });
       if (error !== void 0 && error !== null) wrapped.cause = error;
       wrapped.networkError = true;
       throw wrapped;
@@ -4515,8 +4574,18 @@ function oauthRecordFromObject(value, depth = 0) {
   return null;
 }
 function readOfficialTokenFile(path) {
+  let raw;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    const wrapped = new Error(`Antigravity token file could not be read: ${error?.code ?? error?.message}`);
+    wrapped.code = error?.code ?? "ANTIGRAVITY_TOKEN_READ_FAILED";
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  try {
+    const parsed = JSON.parse(raw);
     const record = oauthRecordFromObject(parsed);
     return record ? {
       ...record,
@@ -4553,6 +4622,10 @@ function parseAntigravityKeychainValue(value) {
 var cachedKeychainToken = null;
 var lastKeychainReadTime = 0;
 var KEYCHAIN_CACHE_TTL_MS = 6e4;
+function invalidateAntigravityKeychainCache() {
+  cachedKeychainToken = null;
+  lastKeychainReadTime = 0;
+}
 function readAntigravityKeychainToken({ home = homedir3() } = {}) {
   if (process.platform !== "darwin") return null;
   const now = Date.now();
@@ -4631,11 +4704,10 @@ function createAntigravityProjectResolver({
   const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
   const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
   const cache = /* @__PURE__ */ new Map();
+  const CACHE_TTL_MS = 30 * 60 * 1e3;
+  const CACHE_MAX_ENTRIES = 8;
   return async ({ credential = null, account = null, context = {} } = {}) => {
     if (configuredProject) return configuredProject;
-    const cacheKey = account?.accountId ?? context.accountId ?? "default";
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
     const auth = await tokenResolver({
       credential,
       env: { ...env, ...context.env ?? {} },
@@ -4646,6 +4718,11 @@ function createAntigravityProjectResolver({
       error.authExpired = true;
       throw error;
     }
+    const identity = account?.accountId ?? context.accountId ?? "anonymous";
+    const cacheKey = `${identity}:${createHash4("sha256").update(auth.token).digest("hex").slice(0, 16)}`;
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.project;
+    if (cached) cache.delete(cacheKey);
     const headers = {
       authorization: `Bearer ${auth.token}`,
       "content-type": "application/json",
@@ -4668,7 +4745,10 @@ function createAntigravityProjectResolver({
     if (!resolved) {
       throw nativeProviderError(PROVIDER_ID2, "Antigravity did not return a Code Assist project for the selected account", { body: raw });
     }
-    cache.set(cacheKey, resolved);
+    cache.set(cacheKey, { project: resolved, at: Date.now() });
+    while (cache.size > CACHE_MAX_ENTRIES) {
+      cache.delete(cache.keys().next().value);
+    }
     return resolved;
   };
 }
@@ -5329,7 +5409,7 @@ finally:
 sys.exit(exit_code)
 `;
 function hash2(value) {
-  return createHash4("sha256").update(String(value)).digest("hex");
+  return createHash5("sha256").update(String(value)).digest("hex");
 }
 var EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 function normalizeEmail(value) {
@@ -5410,11 +5490,11 @@ function credentialRefreshMode(account) {
   return account?.resources?.sessionPersistence === "captured" ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : null;
 }
 function cliFailure2(code, signal, output, errorOutput) {
-  const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
-  error.code = code;
+  const error = new Error(`Antigravity CLI failed (${signal ?? code ?? "no exit status"})`);
+  error.code = code ?? "ANTIGRAVITY_CLI_EXIT";
   const structured = parseJsonOutput2(output);
   const structuredDetail = structured?.error ?? structured?.response ?? structured?.result?.error ?? structured?.result?.response;
-  error.detail = String(errorOutput || structuredDetail || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  error.detail = trimDetail(errorOutput || structuredDetail);
   return error;
 }
 function runCommand(command, args, {
@@ -5486,6 +5566,103 @@ function parseJsonOutput2(output) {
     }
     return null;
   }
+}
+function runStreamingCommand(command, args, { env = process.env, timeoutMs = 3e5, signal, stdin, onStderr } = {}) {
+  return (async function* lines() {
+    const input = typeof stdin === "string" ? stdin : null;
+    const child = spawn4(command, args, {
+      env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
+      stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"],
+      windowsHide: true,
+      ...signal ? { signal } : {}
+    });
+    child.stdin?.on("error", () => {
+    });
+    if (input !== null) child.stdin.end(input);
+    const stdout = [];
+    const stderr = [];
+    let spawnError = null;
+    let timedOut = false;
+    let closedResult = null;
+    let forceTimer = null;
+    let timer = null;
+    let terminationRequested = false;
+    const terminate = () => {
+      if (closedResult || terminationRequested) return;
+      terminationRequested = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+      forceTimer = setTimeout(() => {
+        if (!closedResult) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+          }
+        }
+      }, 1e3);
+      forceTimer.unref?.();
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+    child.stderr.on("data", (chunk) => {
+      stderr.push(chunk);
+      if (typeof onStderr === "function") {
+        try {
+          onStderr(chunk);
+        } catch {
+        }
+      }
+    });
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    const closed = new Promise((resolve2) => {
+      child.once("close", (code, closeSignal) => {
+        closedResult = { code, signal: closeSignal };
+        clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
+        resolve2(closedResult);
+      });
+    });
+    const reader = createInterface({ input: child.stdout });
+    try {
+      for await (const line of reader) {
+        stdout.push(line);
+        yield line;
+      }
+    } finally {
+      reader.close();
+      terminate();
+      clearTimeout(timer);
+      await Promise.race([closed, delay2(2e3)]);
+    }
+    const result = await closed;
+    const output = stdout.join("\n");
+    const errorOutput = Buffer.concat(stderr).toString("utf8");
+    if (spawnError) throw spawnError;
+    if (timedOut) {
+      const timeoutError = new Error(`Antigravity CLI timed out after ${timeoutMs}ms`);
+      timeoutError.code = "TIMEOUT";
+      timeoutError.detail = trimDetail(errorOutput);
+      throw timeoutError;
+    }
+    if (result.code !== 0) {
+      throw cliFailure2(result.code, result.signal, output, errorOutput);
+    }
+  })();
+}
+function trimDetail(value, limit = 300) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+function delay2(ms) {
+  return new Promise((resolve2) => {
+    const timer = setTimeout(resolve2, ms);
+    timer.unref?.();
+  });
 }
 function normalizeToken(value) {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -5770,6 +5947,969 @@ function createAntigravityCatalogLoader({
     });
   };
   return loadCatalog;
+}
+function familyPrefixForModel(model) {
+  const defaultEffort = model?.reasoning?.defaultEffort;
+  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
+  const suffix = `-${defaultEffort}`;
+  return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
+}
+async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
+  if (typeof model !== "string" || typeof reasoningEffort !== "string" || !catalogLoader) {
+    return { model, reasoningEffort };
+  }
+  try {
+    const catalog = await catalogLoader();
+    const selected = catalog?.models?.find((candidate2) => candidate2?.id === model);
+    const prefix = familyPrefixForModel(selected);
+    if (!selected || !prefix) return { model, reasoningEffort };
+    const target = catalog.models.find((candidate2) => {
+      return candidate2?.id?.startsWith(`${prefix}-`) && candidate2.reasoning?.defaultEffort === reasoningEffort;
+    });
+    if (!target) return { model, reasoningEffort };
+    return { model: target.id, reasoningEffort: void 0 };
+  } catch {
+    return { model, reasoningEffort };
+  }
+}
+function contentText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join("\n");
+  if (!value || typeof value !== "object") return "";
+  if (value.type === "tool-call") {
+    const args = typeof value.arguments === "string" ? value.arguments : JSON.stringify(value.arguments ?? {});
+    return `[tool call: ${value.name ?? "unknown"}${value.id ? ` id=${value.id}` : ""}] ${args}`;
+  }
+  if (value.type === "tool-result") {
+    const text4 = contentText(value.content);
+    return value.toolCallId ? `[tool result for id=${value.toolCallId}]
+${text4}` : text4;
+  }
+  if (typeof value.text === "string") return value.text;
+  if (typeof value.content === "string" || Array.isArray(value.content)) return contentText(value.content);
+  if (value.type === "image") return "[previous image attachment omitted by Antigravity CLI]";
+  return "";
+}
+function estimatedTokens(value) {
+  const text4 = String(value ?? "");
+  if (!text4) return 0;
+  return Math.ceil(Buffer.byteLength(text4, "utf8") / 4);
+}
+function messageText(message) {
+  return contentText(message?.content ?? message?.text);
+}
+function messagesWithinContext(request) {
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  const contextWindow = finiteNumber(request.modelContext?.contextWindow);
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) return messages;
+  const outputBudget = finiteNumber(request.maxTokens ?? request.modelContext?.maxTokens);
+  const inputBudget = contextWindow - (Number.isInteger(outputBudget) ? outputBudget : 0);
+  if (inputBudget <= 0) return messages.slice(-1);
+  const systemMessages = messages.filter((message) => message?.role === "system");
+  const otherMessages = messages.filter((message) => message?.role !== "system");
+  let used = estimatedTokens(request.system);
+  for (const message of systemMessages) used += estimatedTokens(messageText(message));
+  if (used + otherMessages.reduce((sum, message) => sum + estimatedTokens(messageText(message)), 0) <= inputBudget) {
+    return messages;
+  }
+  const selected = [];
+  for (let index = otherMessages.length - 1; index >= 0; index -= 1) {
+    const message = otherMessages[index];
+    const cost = estimatedTokens(messageText(message));
+    if (selected.length === 0 || used + cost <= inputBudget) {
+      selected.unshift(message);
+      used += cost;
+    }
+  }
+  return [...systemMessages, ...selected];
+}
+var ANTIGRAVITY_TRANSCRIPT_RULES = [
+  "rules:",
+  "- \u5386\u53F2\u8BB0\u5F55\u91CC\u4F60\u5DF2\u7ECF\u6267\u884C\u8FC7\u7684\u547D\u4EE4\u53CA\u5176\u8F93\u51FA\u4EC5\u4F9B\u53C2\u8003\uFF1A\u4E0D\u8981\u91CD\u590D\u6267\u884C\u76F8\u540C\u6216\u76F8\u4F3C\u7684\u547D\u4EE4\u3002",
+  "- \u62FF\u5230\u6700\u8FD1\u7684\u547D\u4EE4\u8F93\u51FA\u540E\uFF0C\u5982\u679C\u4FE1\u606F\u5DF2\u7ECF\u8DB3\u4EE5\u56DE\u7B54\u7528\u6237\uFF0C\u5FC5\u987B\u76F4\u63A5\u8F93\u51FA\u6700\u7EC8\u7ED3\u8BBA\uFF0C\u7981\u6B62\u518D\u53D1\u8D77\u4EFB\u4F55\u5DE5\u5177\u8C03\u7528\u3002",
+  "- \u9700\u8981\u6267\u884C\u547D\u4EE4\u65F6\uFF0C\u5FC5\u987B\u901A\u8FC7\u539F\u751F\u5DE5\u5177\u8C03\u7528\u53D1\u8D77\uFF1B\u7EDD\u5BF9\u4E0D\u8981\u5728\u56DE\u590D\u6587\u672C\u91CC\u4E66\u5199\u5DE5\u5177\u8C03\u7528\u6216\u547D\u4EE4\u7684\u6267\u884C\u8BF7\u6C42\u3002",
+  "- \u6BCF\u6B21\u53D1\u8D77\u5DE5\u5177\u8C03\u7528\u524D\uFF0C\u5148\u7528\u4E00\u53E5\u8BDD\u5411\u7528\u6237\u8BF4\u660E\u4F60\u8981\u505A\u4EC0\u4E48\u3001\u4E3A\u4EC0\u4E48\u3002",
+  "- \u6700\u7EC8\u7ED3\u8BBA\u5FC5\u987B\u76F4\u63A5\u56DE\u5E94\u6700\u521D\u7684\u7528\u6237\u95EE\u9898\uFF0C\u4F7F\u7528\u7528\u6237\u7684\u8BED\u8A00\uFF0C\u800C\u4E0D\u662F\u590D\u8FF0\u8C03\u67E5\u8FC7\u7A0B\u3002"
+].join("\n");
+var AGY_PROMPT_HISTORY_BYTE_CAP = 6e4;
+function antigravityRequestPrompt(request = {}) {
+  const header = [];
+  if (typeof request.system === "string" && request.system.length > 0) {
+    header.push(`system:
+${request.system}`);
+  }
+  header.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  const messageSections = [];
+  for (const message of messagesWithinContext(request)) {
+    const text4 = messageText(message);
+    if (!text4) continue;
+    messageSections.push(`${message?.role ?? "message"}:
+${text4}`);
+  }
+  let sections = [...header, ...messageSections];
+  let drop = 0;
+  while (messageSections.length > 0 && Buffer.byteLength(sections.join("\n\n"), "utf8") > AGY_PROMPT_HISTORY_BYTE_CAP && drop < messageSections.length) {
+    drop += 1;
+    sections = [...header, ...messageSections.slice(drop)];
+  }
+  return sections.join("\n\n") || "Continue the conversation.";
+}
+var ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
+  "read_file(/)",
+  // Writing is the whole point of an implementation turn; without this rule the
+  // CLI auto-denies every write_file call (observed: "user denied permission for
+  // write_file(/Users/xzb/Documents/.../package.json)") and the turn ends empty.
+  "write_file(/)",
+  "command(*)",
+  "unsandboxed(*)"
+]);
+function antigravitySettingsFile(env = process.env, home = homedir4()) {
+  return env?.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE || join6(home, ".gemini", "antigravity-cli", "settings.json");
+}
+var mirroredPermissionFiles = /* @__PURE__ */ new Set();
+function ensureAntigravityPermissionMirror({ file, fsModule = null, enabled = true } = {}) {
+  if (!enabled || !file || mirroredPermissionFiles.has(file)) return null;
+  mirroredPermissionFiles.add(file);
+  return mirrorAntigravityPermissions({ file, fsModule });
+}
+function mirrorAntigravityPermissions({
+  file,
+  rules = ANTIGRAVITY_DEFAULT_ALLOW_RULES,
+  fsModule = null
+} = {}) {
+  const syncFs = fsModule ?? { readFileSync: readFileSync2, writeFileSync: writeFileSync2, mkdirSync: mkdirSync2, renameSync, copyFileSync, existsSync };
+  const extra = String(process.env.DOCKYARD_ANTIGRAVITY_EXTRA_ALLOW ?? "").split(",").map((rule) => rule.trim()).filter(Boolean);
+  const wanted = [...rules, ...extra];
+  let settings = {};
+  let existed = false;
+  try {
+    const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+    settings = parsed && typeof parsed === "object" ? parsed : {};
+    existed = true;
+  } catch {
+    settings = {};
+  }
+  const permissions = settings.permissions && typeof settings.permissions === "object" ? settings.permissions : {};
+  const allow = Array.isArray(permissions.allow) ? permissions.allow.slice() : [];
+  const missing = wanted.filter((rule) => !allow.includes(rule));
+  if (missing.length === 0) return { changed: false, added: [], allow };
+  allow.push(...missing);
+  settings.permissions = { ...permissions, allow };
+  try {
+    syncFs.mkdirSync(dirname3(file), { recursive: true });
+    if (existed && !syncFs.existsSync(`${file}.bak`)) {
+      try {
+        syncFs.copyFileSync(file, `${file}.bak`);
+      } catch {
+      }
+    }
+    const tmp = `${file}.${randomUUID4()}.tmp`;
+    syncFs.writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
+    syncFs.renameSync(tmp, file);
+  } catch {
+  }
+  return { changed: true, added: missing, allow };
+}
+var ANTIGRAVITY_TITLE_SYSTEM_MARKER = /^Create a concise title for an AI coding-assistant session/m;
+function isAntigravitySidebandRequest(request = {}) {
+  const purpose = typeof request?.purpose === "string" ? request.purpose.trim().toLowerCase() : "";
+  if (purpose.length > 0 && purpose !== "assistant") return true;
+  const system = typeof request?.system === "string" ? request.system.trim() : "";
+  return ANTIGRAVITY_TITLE_SYSTEM_MARKER.test(system);
+}
+function antigravityConversationsFile(env = process.env, home = homedir4()) {
+  return process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || env?.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || join6(home, ".dockyard-dsh", "antigravity-conversations.json");
+}
+function createAntigravityConversationStore({ file, fsModule = null } = {}) {
+  const syncFs = fsModule ?? { readFileSync: readFileSync2, writeFileSync: writeFileSync2, mkdirSync: mkdirSync2, renameSync };
+  let cache = null;
+  const load = () => {
+    if (cache) return cache;
+    try {
+      const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+      cache = parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      cache = {};
+    }
+    return cache;
+  };
+  return {
+    get(key) {
+      if (!key) return null;
+      const value = load()[key];
+      return value && typeof value === "object" ? value : null;
+    },
+    set(key, value) {
+      if (!key || !value) return;
+      const data = load();
+      data[key] = value;
+      cache = data;
+      try {
+        syncFs.mkdirSync(dirname3(file), { recursive: true });
+        const tmp = `${file}.${randomUUID4()}.tmp`;
+        syncFs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+        syncFs.renameSync(tmp, file);
+      } catch {
+      }
+    }
+  };
+}
+var AGY_ANCHOR_LOG_MAX_BYTES = 512 * 1024;
+function appendAntigravityAnchorLog(file, entry) {
+  try {
+    mkdirSync2(dirname3(file), { recursive: true });
+    let size = 0;
+    try {
+      size = statSync(file).size;
+    } catch {
+      size = 0;
+    }
+    if (size > AGY_ANCHOR_LOG_MAX_BYTES) writeFileSync2(file, "", "utf8");
+    writeFileSync2(file, `${JSON.stringify({ time: (/* @__PURE__ */ new Date()).toISOString(), ...entry })}
+`, { encoding: "utf8", flag: "a" });
+  } catch {
+  }
+}
+function antigravityMessagesFingerprint(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return {
+    msgsLen: list.length,
+    msgsHash: createHash5("sha256").update(JSON.stringify(list)).digest("hex").slice(0, 32)
+  };
+}
+function antigravityHistoryImport(messages, { capBytes = AGY_PROMPT_HISTORY_BYTE_CAP } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const sections = [];
+  for (const message of list) {
+    const text4 = contentText(message?.content ?? message?.text);
+    if (!text4) continue;
+    const role = String(message?.role ?? "message").toLowerCase();
+    sections.push(`${role}:
+${text4}`);
+  }
+  let kept = sections;
+  let drop = 0;
+  while (kept.length > 0 && Buffer.byteLength(kept.join("\n\n"), "utf8") > capBytes && drop < sections.length) {
+    drop += 1;
+    kept = sections.slice(drop);
+  }
+  return kept.join("\n\n");
+}
+function antigravityTailText(messages, fromLen) {
+  const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
+  if (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+    list.shift();
+  }
+  const labelled = list.some((message) => String(message?.role ?? "").toLowerCase() === "assistant");
+  const parts = [];
+  for (const message of list) {
+    const text4 = contentText(message?.content ?? message?.text);
+    if (!text4) continue;
+    parts.push(labelled ? `${String(message?.role ?? "message").toLowerCase()}:
+${text4}` : text4);
+  }
+  return parts.join("\n\n");
+}
+function antigravityAnchorInvocation({ conversationId = null, text: text4 }) {
+  return {
+    args: [
+      ...conversationId ? ["--conversation", conversationId] : [],
+      "--input-format",
+      "stream-json"
+    ],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: typeof text4 === "string" ? text4 : String(text4 ?? "") }
+    })}
+`
+  };
+}
+var AGY_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024;
+function antigravityPromptInvocation(prompt, {
+  thresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES
+} = {}) {
+  const text4 = typeof prompt === "string" ? prompt : String(prompt ?? "");
+  if (Buffer.byteLength(text4, "utf8") < thresholdBytes) {
+    return { args: ["-p", text4], stdin: null };
+  }
+  return {
+    args: ["--input-format", "stream-json"],
+    // agy's stream decoder expects `message.content` as a PLAIN STRING.
+    // A content-parts array (as used by the native protocol) decodes to an
+    // empty prompt and the CLI then waits forever for a usable user turn —
+    // the hung `agy --input-format stream-json` processes observed in the
+    // wild. Verified against agy 1.2.3 on 2026-09-15.
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: text4 }
+    })}
+`
+  };
+}
+function usageFromResponse(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
+  const outputTokens = Number(usage.output_tokens ?? usage.outputTokens);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+  const reasoning = Number(usage.thinking_tokens ?? usage.reasoning_tokens ?? usage.reasoningTokens);
+  const cacheRead = Number(usage.cache_read_tokens ?? usage.cacheReadTokens);
+  const cacheWrite = Number(usage.cache_write_tokens ?? usage.cacheWriteTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    ...Number.isFinite(reasoning) ? { reasoningTokens: reasoning } : {},
+    ...Number.isFinite(cacheRead) ? { cacheReadTokens: cacheRead } : {},
+    ...Number.isFinite(cacheWrite) ? { cacheWriteTokens: cacheWrite } : {}
+  };
+}
+function addUsage(left, right) {
+  if (!right) return left ?? null;
+  if (!left) return { ...right };
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (Number.isFinite(value)) merged[key] = (Number.isFinite(merged[key]) ? merged[key] : 0) + value;
+  }
+  return merged;
+}
+function streamEventTexts(payload) {
+  if (!payload || typeof payload !== "object") return [];
+  const eventName = String(payload.event ?? payload.type ?? "").toLowerCase();
+  const allowText = /delta|message|text|content/.test(eventName) && !/command_result|result/.test(eventName);
+  const texts = [];
+  function visit(value, allowNestedText = false, key = "") {
+    if (typeof value === "string") {
+      if (allowNestedText && key !== "event" && key !== "type") texts.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, allowNestedText, key);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [childKey, child] of Object.entries(value)) {
+      const normalizedKey = childKey.toLowerCase().replace(/[-_]/g, "");
+      if (normalizedKey === "textdelta" || normalizedKey === "contentdelta") {
+        if (typeof child === "string") texts.push(child);
+        else visit(child, true, childKey);
+        continue;
+      }
+      if (normalizedKey === "delta") {
+        if (typeof child === "string") texts.push(child);
+        else visit(child, true, childKey);
+        continue;
+      }
+      if (normalizedKey === "response" || normalizedKey === "error" || normalizedKey === "usage") continue;
+      if (normalizedKey === "text" && (allowNestedText || allowText)) {
+        if (typeof child === "string") texts.push(child);
+        continue;
+      }
+      if (child && typeof child === "object") {
+        visit(child, allowNestedText || normalizedKey.includes("content") || normalizedKey.includes("message"), childKey);
+      }
+    }
+  }
+  visit(payload, allowText);
+  return texts;
+}
+function streamEventResult(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const result = payload.result ?? payload.response;
+  if (typeof result === "string") return { text: result, usage: payload.usage };
+  if (!result || typeof result !== "object") return null;
+  return {
+    text: typeof result.response === "string" ? result.response : contentText(result.response),
+    usage: result.usage ?? payload.usage,
+    status: result.status,
+    error: result.error,
+    ...Array.isArray(result.denied_actions) ? {
+      deniedActions: result.denied_actions.map((entry) => String(entry?.action ?? entry?.name ?? entry?.tool ?? "").trim()).filter((action) => action.length > 0)
+    } : {}
+  };
+}
+function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
+  const denied = [...new Set(deniedActions)];
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 600) : "";
+  if (denied.length === 0 && hint.length === 0) return null;
+  const message = denied.length > 0 ? `Antigravity CLI \u672A\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF1A\u9700\u8981\u6388\u6743\u7684\u5DE5\u5177\u88AB\u81EA\u52A8\u62D2\u7EDD\uFF08${denied.join(", ")}\uFF09\u3002print/headless \u6A21\u5F0F\u65E0\u6CD5\u5F39\u51FA\u6388\u6743\u63D0\u793A\uFF0C\u8BF7\u6539\u7528 DSH \u5DF2\u6CE8\u518C\u7684\u540C\u7C7B\u5DE5\u5177\u91CD\u8BD5\uFF0C\u6216\u5728 agy \u7684 settings.json \u4E2D\u901A\u8FC7 permissions.allow \u653E\u884C\u3002` : `Antigravity CLI \u672A\u4EA7\u751F\u4EFB\u4F55\u8F93\u51FA\uFF1A${hint}`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = hint || null;
+  return error;
+}
+function antigravitySilentRunError({ stderr = "", events = 0, steps = 0, toolErrors = [], resultStatus = null } = {}) {
+  const errorMessages = [...new Set(toolErrors)].slice(0, 3).join("\uFF1B");
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+  const observed = [
+    `\u89E3\u6790\u5230 ${events} \u4E2A\u4E8B\u4EF6\u3001${steps} \u4E2A\u6B65\u9AA4`,
+    resultStatus ? `result.status=${resultStatus}` : "\u6CA1\u6709 result \u4E8B\u4EF6"
+  ].join("\uFF0C");
+  const detail = errorMessages || hint || null;
+  const message = detail ? `Antigravity CLI \u672C\u8F6E\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u53EF\u89C1\u6587\u672C\uFF08${observed}\uFF09\uFF1A${detail}\u3002\u4E3A\u907F\u514D\u91CD\u590D\u6D88\u8017\u989D\u5EA6\uFF0C\u672C\u8F6E\u4E0D\u4F1A\u81EA\u52A8\u91CD\u8BD5\uFF1B\u8BF7\u91CD\u53D1\u4E00\u6B21\uFF0C\u6216\u6362\u7528\u5176\u5B83\u6A21\u578B\u3002` : `Antigravity CLI \u672C\u8F6E\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u53EF\u89C1\u6587\u672C\uFF0C\u4E5F\u6CA1\u6709\u5DE5\u5177\u8C03\u7528\uFF08${observed}\uFF09\u3002\u8FD9\u901A\u5E38\u662F\u4E0A\u6E38\u5076\u53D1\u7A7A\u56DE\u5408\uFF1B\u4E3A\u907F\u514D\u91CD\u590D\u6D88\u8017\u989D\u5EA6\uFF0C\u672C\u8F6E\u4E0D\u4F1A\u81EA\u52A8\u91CD\u8BD5\uFF0C\u8BF7\u91CD\u53D1\u4E00\u6B21\u3002`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = detail;
+  return error;
+}
+var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
+  run_command: "bash",
+  read_url_content: "web_fetch",
+  search_web: "web_search"
+});
+var FAKE_IP_PROBE_HOST = "example.com";
+var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
+var fakeIpCache = /* @__PURE__ */ new Map();
+function ipv4ToInt(address) {
+  const parts = String(address).split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = (value << 8) + octet >>> 0;
+  }
+  return value;
+}
+var RESERVED_V4_BLOCKS = Object.freeze([
+  [0, 4278190080],
+  // 0.0.0.0/8
+  [167772160, 4278190080],
+  // 10.0.0.0/8
+  [1681915904, 4290772992],
+  // 100.64.0.0/10 (CGNAT, Tailscale)
+  [2130706432, 4278190080],
+  // 127.0.0.0/8
+  [2851995648, 4294901760],
+  // 169.254.0.0/16
+  [2886729728, 4293918720],
+  // 172.16.0.0/12
+  [3232235520, 4294901760],
+  // 192.168.0.0/16
+  [3323068416, 4294836224]
+  // 198.18.0.0/15 (benchmarking / fake-IP)
+]);
+function isReservedAddress(address) {
+  const value = ipv4ToInt(address);
+  if (value !== null) return RESERVED_V4_BLOCKS.some(([base, mask]) => (value & mask) >>> 0 === base);
+  const normalized = String(address).trim().toLowerCase();
+  if (normalized === "::" || normalized === "::1") return true;
+  return normalized.startsWith("fe80:") || normalized.startsWith("fc") || normalized.startsWith("fd");
+}
+async function detectFakeIpEnvironment({ host = FAKE_IP_PROBE_HOST, resolver = lookup, now = () => Date.now(), useCache = true } = {}) {
+  const cached = fakeIpCache.get(host);
+  if (useCache && cached !== void 0 && now() - cached.at < FAKE_IP_CACHE_TTL_MS) return cached.value;
+  let value = false;
+  try {
+    const answers = await resolver(host, { all: true, order: "verbatim" });
+    value = Array.isArray(answers) && answers.length > 0 && answers.every((entry) => isReservedAddress(entry?.address));
+  } catch {
+    value = false;
+  }
+  fakeIpCache.set(host, { at: now(), value });
+  return value;
+}
+function shellQuote(value) {
+  return `'${String(value).split("'").join("'\\''")}'`;
+}
+var LOCAL_FETCH_DESCRIPTION = "through the local network stack";
+var LOCAL_FETCH_EXTRACTOR = [
+  'let s="";process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data",d=>s+=d);',
+  'process.stdin.on("end",()=>{',
+  'const ent={"&nbsp;":" ","&amp;":"&","&lt;":"<","&gt;":">","&quot;":String.fromCharCode(34),"&#39;":String.fromCharCode(39)};',
+  's=s.replace(/<script\\b(?![^>]*application\\/ld\\+json)[^>]*>[\\s\\S]*?<\\/script>/gi," ")',
+  '.replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi," ")',
+  '.replace(/<!--[\\s\\S]*?-->/g," ")',
+  '.replace(/<[^>]*>/g," ")',
+  '.replace(/&(nbsp|amp|lt|gt|quot|#39);/g,m=>ent[m]||" ")',
+  '.replace(/[ \\t\\r\\f\\v]+/g," ")',
+  '.replace(/\\n[ \\t]*/g,"\\n")',
+  '.replace(/\\n{3,}/g,"\\n\\n");',
+  'process.stdout.write(s.trim().slice(0,40000)+"\\n")});'
+].join("");
+function antigravityLocalFetchCommand(url) {
+  return [
+    `curl -sSL --retry 2 --retry-connrefused --retry-delay 1 --max-time 30 --max-filesize 5000000 -- ${shellQuote(url)}`,
+    `| { if command -v node >/dev/null 2>&1; then node -e ${shellQuote(LOCAL_FETCH_EXTRACTOR)}; else sed -e 's/<[^>]*>/ /g' | tr -s '[:space:]' ' '; fi; }`
+  ].join(" ");
+}
+function antigravityToolCallId(update, request) {
+  return String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`);
+}
+function antigravityLocalFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: antigravityLocalFetchCommand(url),
+      description: `Fetch ${url} ${LOCAL_FETCH_DESCRIPTION}`
+    },
+    id: antigravityToolCallId(update, request)
+  };
+}
+function toolResultText2(block) {
+  const content = Array.isArray(block?.content) ? block.content : [];
+  return content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("");
+}
+function urlAlreadyFetchedLocally(request, url) {
+  const messages = Array.isArray(request?.messages) ? request.messages : [];
+  const commands = /* @__PURE__ */ new Map();
+  const outputs = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const block of content) {
+      if (block?.type === "tool-call" && typeof block.id === "string") {
+        commands.set(block.id, typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? ""));
+      } else if (block?.type === "tool-result" && typeof block.toolCallId === "string") {
+        outputs.set(block.toolCallId, toolResultText2(block));
+      }
+    }
+  }
+  for (const [id, args] of commands) {
+    if (!args.includes(url) || !args.includes(LOCAL_FETCH_DESCRIPTION)) continue;
+    const output = outputs.get(id);
+    if (typeof output !== "string") continue;
+    const text4 = output.trim();
+    if (text4.length < 200) continue;
+    if (/^\[stderr\]/.test(text4) || /\bcurl: \(\d+\)/.test(text4)) continue;
+    return true;
+  }
+  return false;
+}
+function antigravityRepeatFetchToolCall(url, update, request) {
+  return {
+    name: "bash",
+    arguments: {
+      command: `echo ${shellQuote(`URL ${url} was already fetched in this conversation; its text is in the matching tool result above. Use it instead of fetching again.`)}`,
+      description: `Reuse the fetched content of ${url} instead of re-fetching it`
+    },
+    id: antigravityToolCallId(update, request)
+  };
+}
+function requestTool(request, providerToolName) {
+  const tools = Array.isArray(request?.tools) ? request.tools : [];
+  const exact = tools.find((tool) => tool?.name === providerToolName);
+  if (exact) return { name: exact.name, definition: exact };
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  if (translated) {
+    const target = tools.find((tool) => tool?.name === translated);
+    if (target) return { name: target.name, definition: target };
+  }
+  return null;
+}
+function toolCallFromEvent(payload, request, options = {}) {
+  const update = payload?.step_update;
+  if (!update || String(update.state ?? "").toUpperCase() !== "ACTIVE" || update.step_type !== "tool") return null;
+  const providerName2 = String(update.tool_name ?? update.tool_info?.name ?? "");
+  if (!providerName2) return null;
+  const target = requestTool(request, providerName2);
+  if (!target) return null;
+  const raw = update.tool_info?.parameters;
+  const parameters = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
+  if (providerName2 === "run_command" && target.name === "bash") {
+    const command = parameters.command ?? parameters.CommandLine;
+    if (typeof command === "string" && command.length > 0) {
+      return {
+        name: target.name,
+        arguments: {
+          command,
+          // agy's run_command never carries a description; show a command
+          // snippet instead of the opaque "Run the requested command" so the
+          // UI reflects what each forwarded call actually does.
+          description: parameters.description ?? parameters.Description ?? `\u8FD0\u884C\uFF1A${command.replace(/\s+/g, " ").trim().slice(0, 80)}`,
+          ...parameters.workdir ?? parameters.Cwd ? { workdir: parameters.workdir ?? parameters.Cwd } : {},
+          ...parameters.timeoutMs ?? parameters.TimeoutMs ? { timeoutMs: parameters.timeoutMs ?? parameters.TimeoutMs } : {}
+        },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+      };
+    }
+  }
+  if (providerName2 === "read_url_content" && target.name === "web_fetch") {
+    const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
+    if (typeof url === "string" && url.length > 0) {
+      if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
+        if (urlAlreadyFetchedLocally(request, url)) {
+          return antigravityRepeatFetchToolCall(url, update, request);
+        }
+        return antigravityLocalFetchToolCall(url, update, request);
+      }
+      return {
+        name: target.name,
+        arguments: { url },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+      };
+    }
+  }
+  if (providerName2 === "search_web" && target.name === "web_search") {
+    const query = parameters.query ?? parameters.Query ?? parameters.q;
+    const queries = Array.isArray(parameters.queries) ? parameters.queries : typeof query === "string" && query.trim().length > 0 ? [query.trim()] : [];
+    if (queries.length > 0) {
+      return {
+        name: target.name,
+        arguments: { queries },
+        id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+      };
+    }
+  }
+  return {
+    name: target.name,
+    arguments: parameters,
+    id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
+  };
+}
+function appendDelta(current, next) {
+  if (!next) return "";
+  if (!current) return next;
+  if (next.startsWith(current)) return next.slice(current.length);
+  if (current.endsWith(next)) return "";
+  return next;
+}
+function shingles(text4, size = 6) {
+  const normalized = String(text4 ?? "").replace(/\s+/g, "");
+  const set = /* @__PURE__ */ new Set();
+  for (let i = 0; i + size <= normalized.length; i += 1) set.add(normalized.slice(i, i + size));
+  return set;
+}
+function antigravityRepeatRatio(emitted, candidate2) {
+  if (!candidate2) return 0;
+  const candidateShingles = shingles(candidate2);
+  if (candidateShingles.size === 0) return 0;
+  const emittedShingles = shingles(emitted);
+  if (emittedShingles.size === 0) return 0;
+  let shared = 0;
+  for (const shingle of candidateShingles) {
+    if (emittedShingles.has(shingle)) shared += 1;
+  }
+  return shared / candidateShingles.size;
+}
+var AGY_REPEAT_MIN_CHARS = 200;
+var AGY_REPEAT_RATIO = 0.8;
+function createAntigravityCliExecutor({
+  cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
+  env = process.env,
+  // One print-mode turn carries the whole conversation and can legitimately run
+  // for minutes on a large context (measured: a trivial prompt already costs
+  // ~35s on gemini-3.8-flash-high). The CLI's own --print-timeout defaults to
+  // 5m, which killed healthy turns mid-flight and forced a full replay retry —
+  // doubling the cost of every slow turn. Widen both boundaries: agy aborts
+  // first with its own error, DSH kills a minute later as the outer guard.
+  printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
+  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 96e4,
+  // Sideband turns (titles/summaries) are short and must not occupy the fast
+  // path with a full-length budget; a short ceiling fails them cheaply.
+  sidebandTimeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_SIDEBAND_TIMEOUT_MS) || 12e4,
+  commandRunner = runCommand,
+  catalogLoader = null,
+  streamCommandRunner = runStreamingCommand,
+  detectFakeIp = detectFakeIpEnvironment,
+  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+  conversationStore = null,
+  anchorLogPath = null,
+  settingsFile = null,
+  mirrorPermissions = env?.DOCKYARD_ANTIGRAVITY_MIRROR_PERMISSIONS !== "0",
+  // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
+  // to the legacy replay path on any anchored failure, so default-on is safe.
+  sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0"
+} = {}) {
+  return async function executeAntigravity({ request = {}, context = {} } = {}) {
+    if (contentHasImageInCurrentTurn(request)) {
+      throw unsupportedContentError2(
+        PROVIDER_ID3,
+        "Antigravity CLI \u5F53\u524D\u6CA1\u6709\u66B4\u9732\u53EF\u63A5\u6536 DSH \u56FE\u7247\u9644\u4EF6\u7684\u539F\u751F\u8F93\u5165\u901A\u9053"
+      );
+    }
+    const resolved = await resolveAntigravityInvocationModel({
+      catalogLoader,
+      model: request.model,
+      reasoningEffort: request.reasoningEffort
+    });
+    const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
+    ensureAntigravityPermissionMirror({
+      file: settingsFile ?? antigravitySettingsFile(env),
+      enabled: mirrorPermissions
+    });
+    const sideband = isAntigravitySidebandRequest(request);
+    const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
+    const legacyStream = async function* () {
+      const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
+        thresholdBytes: promptStdinThresholdBytes
+      });
+      const args = [...invocation.args];
+      if (typeof resolved.model === "string" && resolved.model.length > 0) {
+        args.push("--model", resolved.model);
+      }
+      if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
+        args.push("--effort", resolved.reasoningEffort);
+      }
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      let text4 = "";
+      let usage = null;
+      let stepUsage = null;
+      const handledTools = /* @__PURE__ */ new Set();
+      const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
+      for await (const line of streamCommandRunner(cliPath, args, {
+        env,
+        timeoutMs: effectiveTimeoutMs,
+        signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 2e3) diagnostics.stderr += String(chunk);
+        }
+      })) {
+        const parsed = parseJsonOutput2(line);
+        if (!parsed) continue;
+        diagnostics.events += 1;
+        const deniedUpdate = parsed?.step_update;
+        if (deniedUpdate && deniedUpdate.step_type === "tool" && String(deniedUpdate.state ?? "").toUpperCase() === "ERROR") {
+          const failureText = String(deniedUpdate.tool_info?.error?.message ?? "").trim();
+          if (failureText) diagnostics.toolErrors.push(failureText);
+          if (/permission/i.test(failureText)) {
+            const grant = /denied permission for (.+?)\)\s*$/.exec(failureText)?.[1];
+            const deniedName = String(deniedUpdate.tool_name ?? deniedUpdate.tool_info?.name ?? "").trim();
+            const label = grant ? `${grant})` : deniedName;
+            if (label) diagnostics.deniedActions.push(label);
+          }
+        }
+        if (deniedUpdate && String(deniedUpdate.state ?? "").toUpperCase() !== "ACTIVE") {
+          diagnostics.steps += 1;
+          stepUsage = addUsage(stepUsage, usageFromResponse(deniedUpdate.usage));
+        }
+        const tool = toolCallFromEvent(parsed, request, { preferLocalUrlFetch });
+        if (tool) {
+          const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
+          if (handledTools.has(key)) continue;
+          handledTools.add(key);
+          yield { type: "block-end", index: 0, block: { type: "text", text: text4 } };
+          yield { type: "block-start", index: 1, blockType: "tool-call" };
+          yield {
+            type: "block-end",
+            index: 1,
+            block: {
+              type: "tool-call",
+              id: tool.id,
+              name: tool.name,
+              arguments: JSON.stringify(tool.arguments)
+            }
+          };
+          const reported = usage ?? stepUsage;
+          if (reported) yield { type: "usage", usage: reported };
+          yield { type: "finish", reason: { kind: "tool-calls" } };
+          return;
+        }
+        for (const delta of streamEventTexts(parsed)) {
+          const next = appendDelta(text4, delta);
+          if (!next) continue;
+          text4 += next;
+          yield { type: "text-delta", index: 0, text: next };
+        }
+        const final = streamEventResult(parsed);
+        if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
+          if (final.status && final.status !== "SUCCESS") {
+            const detail = typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "");
+            if (text4.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail || final.text || null;
+              throw error;
+            }
+            const note = `
+
+> \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            text4 += note;
+            yield { type: "text-delta", index: 0, text: note };
+          }
+          let next = appendDelta(text4, final.text);
+          if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
+          if (next) {
+            text4 += next;
+            yield { type: "text-delta", index: 0, text: next };
+          }
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = final.deniedActions;
+          }
+          usage = usageFromResponse(final.usage) ?? usage;
+        }
+        usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      if (text4.trim().length === 0) {
+        if (request.signal?.aborted) {
+          const aborted = new Error("Antigravity CLI run was cancelled");
+          aborted.name = "AbortError";
+          throw aborted;
+        }
+        const emptyOutput = antigravityEmptyOutputError(diagnostics);
+        if (emptyOutput) throw emptyOutput;
+        throw antigravitySilentRunError(diagnostics);
+      }
+      yield { type: "block-end", index: 0, block: { type: "text", text: text4 } };
+      const finalUsage = usage ?? stepUsage;
+      if (finalUsage) yield { type: "usage", usage: finalUsage };
+      yield { type: "finish", reason: { kind: "stop" } };
+    };
+    const rawSessionId = request.sessionId ?? context.sessionId;
+    const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : null;
+    if (!sessionAnchor || !sessionKey || sideband) {
+      if (sideband && (typeof request.purpose === "string" || isAntigravitySidebandRequest(request))) {
+        appendAntigravityAnchorLog(
+          anchorLogPath ?? join6(dirname3(antigravityConversationsFile(env)), "antigravity-anchor.log"),
+          { kind: "sideband_bypass", sessionKey, purpose: typeof request.purpose === "string" ? request.purpose : "(system-marker)" }
+        );
+      }
+      return legacyStream();
+    }
+    const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const record = store.get(sessionKey);
+    const continuation = Boolean(
+      record && Number.isInteger(record.msgsLen) && record.msgsLen <= messages.length && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash
+    );
+    const tail = continuation ? antigravityTailText(messages, record.msgsLen) : `\u4EE5\u4E0B\u662F\u672C\u4F1A\u8BDD\u6B64\u524D\u7684\u5BF9\u8BDD\u5386\u53F2\uFF08\u7531\u5176\u5B83\u6A21\u578B\u4EA7\u751F\uFF09\uFF0C\u8BF7\u628A\u5B83\u5F53\u4F5C\u4F60\u81EA\u5DF1\u7684\u4E0A\u4E0B\u6587\u7EE7\u7EED\uFF1A
+
+${antigravityHistoryImport(messages)}`;
+    const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0 ? `\u4F1A\u8BDD\u7EA6\u5B9A\uFF08\u957F\u671F\u6709\u6548\uFF09\uFF1A
+${request.system}
+
+` : "";
+    const anchorText = `${conversationIntro}${tail}`;
+    if (!anchorText.trim()) return legacyStream();
+    const anchorLogFile = anchorLogPath ?? join6(dirname3(antigravityConversationsFile(env)), "antigravity-anchor.log");
+    const anchoredStream = async function* () {
+      const cid = continuation ? record.cid : null;
+      const diagnostics = { events: 0, steps: 0, resultStatus: null, deniedActions: [], stderr: "" };
+      const startedAt = Date.now();
+      const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
+      const args = [...invocation.args];
+      if (typeof resolved.model === "string" && resolved.model.length > 0) {
+        args.push("--model", resolved.model);
+      }
+      if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
+        args.push("--effort", resolved.reasoningEffort);
+      }
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      let text4 = "";
+      let usage = null;
+      let seenConversationId = null;
+      for await (const line of streamCommandRunner(cliPath, args, {
+        env,
+        timeoutMs,
+        signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 1e3) diagnostics.stderr += String(chunk);
+        }
+      })) {
+        const parsed = parseJsonOutput2(line);
+        if (!parsed) continue;
+        diagnostics.events += 1;
+        const stepUpdate = parsed?.step_update;
+        if (stepUpdate) {
+          diagnostics.steps += 1;
+          if (stepUpdate.step_type === "tool" && String(stepUpdate.state ?? "").toUpperCase() === "ERROR") {
+            diagnostics.steps += 0;
+            diagnostics.deniedActions.push(String(stepUpdate.tool_info?.error?.message ?? stepUpdate.tool_name ?? "").slice(0, 200));
+          }
+        }
+        seenConversationId = seenConversationId ?? parsed.conversation_id ?? parsed.result?.conversation_id ?? parsed.step_update?.conversation_id ?? null;
+        for (const delta of streamEventTexts(parsed)) {
+          const next = appendDelta(text4, delta);
+          if (!next) continue;
+          text4 += next;
+          yield { type: "text-delta", index: 0, text: next };
+        }
+        const final = streamEventResult(parsed);
+        if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
+          }
+          if (final.status && final.status !== "SUCCESS") {
+            const detail = `${typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "")} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length, detail: detail.slice(0, 300) });
+            if (text4.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail;
+              throw error;
+            }
+            const note = `
+
+> \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            text4 += note;
+            yield { type: "text-delta", index: 0, text: note };
+          }
+          let next = appendDelta(text4, final.text);
+          if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
+          if (next) {
+            text4 += next;
+            yield { type: "text-delta", index: 0, text: next };
+          }
+          usage = usageFromResponse(final.usage) ?? usage;
+        }
+        usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      if (text4.trim().length === 0 || request.signal?.aborted) {
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchored_empty",
+          sessionKey,
+          cid,
+          diagnostics,
+          textLen: text4.length,
+          aborted: Boolean(request.signal?.aborted),
+          elapsedMs: Date.now() - startedAt
+        });
+        const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
+        if (request.signal?.aborted) error.name = "AbortError";
+        throw error;
+      }
+      appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_ok", sessionKey, cid, diagnostics, textLen: text4.length, elapsedMs: Date.now() - startedAt });
+      if (seenConversationId) {
+        store.set(sessionKey, {
+          cid: seenConversationId,
+          msgsLen: messages.length,
+          msgsHash: antigravityMessagesFingerprint(messages).msgsHash,
+          model: resolved.model ?? null
+        });
+      }
+      yield { type: "block-end", index: 0, block: { type: "text", text: text4 } };
+      if (usage) yield { type: "usage", usage };
+      yield { type: "finish", reason: { kind: "stop" } };
+    };
+    return (async function* () {
+      let yielded = false;
+      let lastError = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          for await (const chunk of anchoredStream()) {
+            if (chunk.type !== "block-start") yielded = true;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          if (yielded || error?.name === "AbortError") throw error;
+          appendAntigravityAnchorLog(anchorLogFile, {
+            kind: "anchor_attempt_failed",
+            sessionKey,
+            attempt,
+            reason: String(error?.code ?? error?.message ?? error).slice(0, 200)
+          });
+        }
+      }
+      appendAntigravityAnchorLog(anchorLogFile, {
+        kind: "anchor_degraded",
+        sessionKey,
+        yielded,
+        reason: String(lastError?.code ?? lastError?.message ?? lastError).slice(0, 200)
+      });
+      yield* legacyStream();
+    })();
+  };
 }
 function quotaGroups(data) {
   if (!data || typeof data !== "object") return [];
@@ -6422,6 +7562,7 @@ var AntigravityOfficialSessionDriver = class {
       if (credentialRef && typeof context.secretStore?.write === "function") {
         await context.secretStore.write(credentialRef, nextCredential);
       }
+      invalidateAntigravityKeychainCache();
       return { session: refreshed, credential: nextCredential, rotated: true };
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -6478,6 +7619,7 @@ var AntigravityOfficialSessionDriver = class {
       if (!accessChanged && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
+      invalidateAntigravityKeychainCache();
       return next;
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -6626,6 +7768,7 @@ var AntigravityOfficialSessionDriver = class {
     if (!session) throw new Error("Antigravity candidate is no longer available; scan again");
     if (!context.secretStore) throw new Error("A secure credential store is required");
     await context.secretStore.write(value.credentialRef, session);
+    invalidateAntigravityKeychainCache();
     return {
       providerId: PROVIDER_ID3,
       accountId: value.accountId,
@@ -6890,7 +8033,7 @@ function createAntigravityModule({ driver = {} } = {}) {
 }
 
 // modules/provider-grok/src/driver.mjs
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
@@ -6908,7 +8051,7 @@ var DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
 var DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
 var CREDENTIAL_SLOT3 = Symbol("dockyard-grok-credential");
 function hash3(value) {
-  return createHash5("sha256").update(String(value)).digest("hex");
+  return createHash6("sha256").update(String(value)).digest("hex");
 }
 function firstString3(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -7888,11 +9031,14 @@ async function* streamGrokResponse(response) {
     }
   }
   if (!terminated) {
-    throw nativeProviderError(
+    const error = nativeProviderError(
       PROVIDER_ID5,
       "xAI stream ended without a finish_reason or [DONE] terminator; the response may be truncated",
-      { code: "GROK_TRUNCATED_STREAM" }
+      { code: "TRANSPORT" }
     );
+    error.truncated = true;
+    error.networkError = true;
+    throw error;
   }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
   if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text4 } };
@@ -7961,7 +9107,7 @@ function createGrokModule({ driver = {} } = {}) {
 }
 
 // modules/provider-claude/src/driver.mjs
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { homedir as homedir7 } from "node:os";
 
 // packages/oauth/src/cli-status-authorizer.mjs
@@ -8627,7 +9773,7 @@ var DEFAULT_BROWSER_REDIRECT_URI = "https://platform.claude.com/oauth/code/callb
 var DEFAULT_BROWSER_SCOPE = "user:profile user:inference";
 var CREDENTIAL_SLOT4 = Symbol("dockyard-claude-session");
 function hash4(value) {
-  return createHash6("sha256").update(String(value)).digest("hex");
+  return createHash7("sha256").update(String(value)).digest("hex");
 }
 function firstString6(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -9251,7 +10397,7 @@ function createClaudeModule({ driver = {} } = {}) {
 }
 
 // modules/provider-cursor/src/driver.mjs
-import { createHash as createHash9, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash10, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
 import { homedir as homedir9 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
@@ -9260,10 +10406,10 @@ import { appendFileSync } from "node:fs";
 import * as http2 from "node:http2";
 import { homedir as homedir8 } from "node:os";
 import { join as join9 } from "node:path";
-import { createHash as createHash8, randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
 // modules/provider-cursor/src/native-protocol.mjs
-import { createHash as createHash7, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID7 } from "node:crypto";
 var textEncoder = new TextEncoder();
 var textDecoder = new TextDecoder();
 function concatBytes(parts) {
@@ -9849,7 +10995,7 @@ function resolveCursorAccessToken(options = {}) {
 }
 function cursorHeaders(endpoint2, token, requestId, env) {
   const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION ?? DEFAULT_CURSOR_CLIENT_VERSION;
-  const clientKey = createHash8("sha256").update(`cursor-client-key:${token}`).digest("hex");
+  const clientKey = createHash9("sha256").update(`cursor-client-key:${token}`).digest("hex");
   return {
     ":method": "POST",
     ":path": `${endpoint2.pathname}${endpoint2.search}`,
@@ -9912,7 +11058,7 @@ function streamCursor({
     });
     const url = new URL(endpoint2);
     const sid = `S${Date.now().toString(36)}`;
-    const tokenFP = createHash8("sha256").update(String(token)).digest("hex").slice(0, 8);
+    const tokenFP = createHash9("sha256").update(String(token)).digest("hex").slice(0, 8);
     cursorDebug(`${sid} BEGIN model=${model} endpoint=${url.host} token=${tokenFP} bytes=${encoded.frame.byteLength}`);
     const session = http2Module.connect(url.origin);
     const queue = createAsyncQueue();
@@ -10237,7 +11383,7 @@ var BUILTIN_CURSOR_CATALOG = Object.freeze([
   Object.freeze({ id: "gpt-5-mini", name: "GPT-5 Mini" })
 ]);
 function hash5(value) {
-  return createHash9("sha256").update(String(value)).digest("hex");
+  return createHash10("sha256").update(String(value)).digest("hex");
 }
 function firstString9(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -10753,7 +11899,7 @@ var CursorSubscriptionDriver = class {
       instructions: "\u8BF7\u5728\u5B98\u65B9 Cursor \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE oauthpro\u3002",
       authorizationUrlBuilder: async () => {
         const verifier = randomBytes3(32).toString("base64url");
-        const challenge = createHash9("sha256").update(verifier).digest("base64url");
+        const challenge = createHash10("sha256").update(verifier).digest("base64url");
         const uuid = randomUUID9();
         return {
           url: `${this.websiteUrl}/loginDeepControl?${new URLSearchParams({
@@ -12592,9 +13738,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash10("sha256").update(String(ref)).digest("hex");
+  const digest = createHash11("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
@@ -13872,9 +15018,17 @@ function apply(ctx, config = {}) {
     runtimeOptions.requestExecutors = {
       ...runtimeOptions.requestExecutors ?? {},
       "openai-codex": runtimeOptions.requestExecutors?.["openai-codex"] ?? createCodexDshRequestExecutor(),
-      antigravity: runtimeOptions.requestExecutors?.antigravity ?? createAntigravityNativeExecutor({
-        ...antigravityOptions
-      }),
+      // Google decommissioned the legacy v1internal JSON facade for accounts
+      // that purchased Google AI Pro (loadCodeAssist no longer returns a Code
+      // Assist project; quota/stream endpoints answer 403 SUBSCRIPTION_REQUIRED
+      // #3501). Chat therefore defaults to the official agy CLI executor; set
+      // DOCKYARD_ANTIGRAVITY_NATIVE_CHAT=1 to opt back into the native
+      // transport (for example, when the new client contract is implemented).
+      // See issue #63.
+      antigravity: runtimeOptions.requestExecutors?.antigravity ?? (process.env.DOCKYARD_ANTIGRAVITY_NATIVE_CHAT === "1" ? createAntigravityNativeExecutor({ ...antigravityOptions }) : createAntigravityCliExecutor({
+        ...antigravityOptions,
+        catalogLoader: antigravityCatalogLoader
+      })),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {})
@@ -14004,7 +15158,7 @@ function apply(ctx, config = {}) {
                   return;
                 }
                 const filePath = join13(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync(filePath)) {
+                if (!existsSync2(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;
@@ -14019,7 +15173,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync2(filePath);
+                const content = readFileSync3(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

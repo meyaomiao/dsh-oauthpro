@@ -62,3 +62,30 @@ test("DSH LLM adapter declares no image pricing instead of throwing", () => {
   assert.equal(adapter.imageRequestPricing("openai-codex", "live-model"), undefined);
   assert.equal(adapter.imageRequestPricing(), undefined);
 });
+
+test("providerRetryPolicy returns the harness-resolved flat policy, not the nested config shape", () => {
+  const adapter = createDockyardLlmAdapter({ runtime: fakeRuntime() });
+  const policy = adapter.providerRetryPolicy("openai-codex");
+  assert.equal(policy.mode, "normal");
+  assert.equal(
+    policy.backoff,
+    undefined,
+    "the harness consumes providerRetryPolicy() as resolveRetryPolicy() output, so backoff fields must be flat",
+  );
+  for (const key of ["initialDelayMs", "maxDelayMs", "jitterRatio"]) {
+    assert.ok(
+      Number.isFinite(policy[key]),
+      `providerRetryPolicy().${key} must be a flat finite number for the harness to schedule a delay`,
+    );
+  }
+  for (const code of ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"]) {
+    assert.ok(policy.retryableCodes.includes(code), `retryableCodes must include ${code}`);
+  }
+  // Mirror dsh-llm-retry's localDelay(): undefined backoff fields make this NaN,
+  // and the retry event then dies with `session event "llm/retry" carries
+  // non-JSON-serializable data` before any retry is attempted.
+  const exponential = Math.min(policy.initialDelayMs * 2, policy.maxDelayMs);
+  const jitter = 1 - policy.jitterRatio + 2 * policy.jitterRatio * 0.5;
+  const delayMs = Math.min(exponential * jitter, policy.maxDelayMs);
+  assert.ok(Number.isFinite(delayMs) && delayMs > 0, `harness delayMs must be positive and finite, got ${delayMs}`);
+});

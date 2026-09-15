@@ -1,5 +1,10 @@
 import test from "node:test";
+// Never let the suite mirror permissions into (or read) the real user config:
+// executors that omit `settingsFile` default to ~/.gemini/antigravity-cli.
+process.env.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE ||= join(tmpdir(), `agy-test-settings-${process.pid}.json`);
+process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE ||= join(tmpdir(), `agy-test-convs-${process.pid}.json`);
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -18,13 +23,20 @@ import {
   synthesizeCodexPiAiModel,
 } from "../modules/provider-codex/src/index.mjs";
 import {
+  ANTIGRAVITY_DEFAULT_ALLOW_RULES,
   createAntigravityCatalogLoader,
+  createAntigravityConversationStore,
+  antigravityHistoryImport,
+  antigravityRepeatRatio,
+  isAntigravitySidebandRequest,
   createAntigravityCliExecutor,
   createAntigravityDriver,
   createAntigravityOAuthAuthorizer,
+  detectFakeIpEnvironment,
   createAntigravityNativeQuotaReader,
   enrichAntigravityModelCatalog,
   extractAntigravityAccountEmail,
+  antigravityPromptInvocation,
   antigravityRequestPrompt,
   parseAntigravityNativeQuota,
   parseAntigravityKeychainValue,
@@ -638,16 +650,32 @@ test("Antigravity driver uses official CLI data without requiring token storage"
     if (args[0] === "models") return { output: "Fetching available models...\nmodel-from-provider\tLive model\n", errorOutput: "" };
     throw new Error("unexpected command");
   };
-  const driver = createAntigravityDriver({ commandRunner, tokenResolver: () => null });
-  const secretStore = new MemorySecretStore();
-  const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
-  assert.equal(discovered.candidates.length, 1);
-  const account = await driver.importAccount(discovered.candidates[0], { secretStore });
-  const quota = await driver.getQuota(account, { secretStore, now: new Date("2026-08-14T12:00:00.000Z") });
-  assert.equal(quota.quota.remaining, 0.75);
-  assert.equal(quota.resources, undefined);
-  assert.equal(quota.credits.remaining, 4);
-  assert.deepEqual((await driver.getCatalog()).models, [{ id: "model-from-provider", name: "Live model" }]);
+  // The default catalog cache is the shared ~/.dockyard-dsh/antigravity-catalog.json,
+  // which a running DSH host (and other suites) write live provider data into.
+  // Reading it here made this test pass or fail depending on the machine state.
+  const home = await mkdtemp(join(tmpdir(), "agy-driver-catalog-"));
+  try {
+    const driver = createAntigravityDriver({
+      commandRunner,
+      tokenResolver: () => null,
+      env: {
+        ...process.env,
+        DOCKYARD_DSH_HOME: home,
+        DOCKYARD_ANTIGRAVITY_CATALOG_CACHE: join(home, "antigravity-catalog.json"),
+      },
+    });
+    const secretStore = new MemorySecretStore();
+    const discovered = await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") });
+    assert.equal(discovered.candidates.length, 1);
+    const account = await driver.importAccount(discovered.candidates[0], { secretStore });
+    const quota = await driver.getQuota(account, { secretStore, now: new Date("2026-08-14T12:00:00.000Z") });
+    assert.equal(quota.quota.remaining, 0.75);
+    assert.equal(quota.resources, undefined);
+    assert.equal(quota.credits.remaining, 4);
+    assert.deepEqual((await driver.getCatalog()).models, [{ id: "model-from-provider", name: "Live model" }]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity account discovery keeps provider identity and captures distinct local sessions", async () => {
@@ -1271,7 +1299,7 @@ test("Antigravity executor calls the official CLI with the selected model and ef
   });
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
-  assert.deepEqual(command.args.slice(-7), ["--model", "gemini-live-medium", "--effort", "medium", "--sandbox", "--output-format", "stream-json"]);
+  assert.deepEqual(command.args.slice(-9), ["--model", "gemini-live-medium", "--effort", "medium", "--sandbox", "--print-timeout", "900s", "--output-format", "stream-json"]);
   assert.equal(command.args[0], "-p");
   assert.match(command.args[1], /system:\nBe concise\./);
   assert.deepEqual(chunks, [
@@ -1282,6 +1310,120 @@ test("Antigravity executor calls the official CLI with the selected model and ef
     { type: "usage", usage: { inputTokens: 3, outputTokens: 2 } },
     { type: "finish", reason: { kind: "stop" } },
   ]);
+});
+
+test("Antigravity keeps the argv prompt while it fits the kernel budget", () => {
+  const invocation = antigravityPromptInvocation("system:\nbe brief");
+  assert.deepEqual(invocation.args, ["-p", "system:\nbe brief"]);
+  assert.equal(invocation.stdin, null);
+});
+
+test("Antigravity measures the prompt budget in bytes, not characters", () => {
+  // 40k CJK characters are ~120KB on the wire: under the character count, but
+  // well past the 64 KiB argv budget, so it must use the stdin transport.
+  const cjk = "汉".repeat(40_000);
+  const invocation = antigravityPromptInvocation(cjk);
+  assert.deepEqual(invocation.args, ["--input-format", "stream-json"]);
+  const payload = JSON.parse(invocation.stdin);
+  assert.equal(payload.event, "user");
+  assert.equal(payload.message.role, "user");
+  // agy's stream decoder requires message.content as a plain string; a
+  // content-parts array decodes to an empty prompt and the CLI hangs forever.
+  assert.equal(payload.message.content, cjk);
+});
+
+test("Antigravity moves an oversized prompt off argv onto stdin", () => {
+  const prompt = `system:\n${"x".repeat(200_000)}`;
+  const invocation = antigravityPromptInvocation(prompt);
+  assert.deepEqual(invocation.args, ["--input-format", "stream-json"]);
+  // Nothing resembling the conversation may stay in argv: that is what the
+  // kernel rejects with E2BIG before the CLI can even start.
+  assert.ok(invocation.args.every((arg) => arg.length < 64));
+  assert.ok(invocation.stdin.endsWith("\n"));
+  const payload = JSON.parse(invocation.stdin);
+  assert.equal(payload.event, "user");
+  assert.equal(typeof payload.message.content, "string");
+  assert.equal(payload.message.content, prompt);
+});
+
+test("Antigravity executor hands an oversized prompt to the CLI runner as stdin", async () => {
+  let command;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, options) {
+      command = { path, args, options };
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      system: "s".repeat(300_000),
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+  });
+  for await (const _chunk of stream) { /* drain */ }
+  assert.deepEqual(command.args.slice(0, 2), ["--input-format", "stream-json"]);
+  assert.equal(command.args.includes("-p"), false);
+  assert.ok(command.args.every((arg) => arg.length < 64));
+  const payload = JSON.parse(command.options.stdin);
+  assert.match(payload.message.content, /^system:\ns{300000}/);
+  assert.equal(typeof payload.message.content, "string");
+});
+
+test("Antigravity executor delivered a >ARG_MAX prompt through real CLI stdin", {
+  // The fixture is a POSIX shell script: the negative control relies on
+  // execve-level argv limits that Windows does not express the same way.
+  skip: process.platform === "win32" ? "POSIX shell fixture" : false,
+}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-e2big-"));
+  try {
+    const capturePath = join(dir, "input.ndjson");
+    const argvPath = join(dir, "argv.txt");
+    const scriptPath = join(dir, "fake-agy.sh");
+    await writeFile(scriptPath, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}`,
+      `cat > ${JSON.stringify(capturePath)}`,
+      `printf '{"event":"result","result":{"status":"SUCCESS","response":"received %s bytes","usage":{"input_tokens":1,"output_tokens":1}}}\\n' "$(wc -c < ${JSON.stringify(capturePath)} | tr -d ' ')"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const request = {
+      model: "gemini-live-medium",
+      system: "x".repeat(1_500_000),
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    };
+    const prompt = antigravityRequestPrompt(request);
+    // Negative control: the pre-fix `-p <prompt>` transport cannot even exec.
+    const argvFailure = spawnSync(scriptPath, ["-p", prompt]);
+    assert.equal(argvFailure.error?.code, "E2BIG");
+
+    const executor = createAntigravityCliExecutor({ cliPath: scriptPath, env: process.env });
+    const stream = await executor({ request });
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+
+    const argvLines = (await readFile(argvPath, "utf8")).split("\n").filter(Boolean);
+    assert.ok(argvLines.includes("--input-format"));
+    assert.equal(argvLines.includes("-p"), false);
+    assert.ok(argvLines.every((line) => line.length < 128));
+
+    const raw = await readFile(capturePath, "utf8");
+    const delivered = JSON.parse(raw);
+    assert.equal(delivered.event, "user");
+    assert.equal(typeof delivered.message.content, "string");
+    assert.equal(delivered.message.content, prompt);
+
+    const text = chunks.find((chunk) => chunk.type === "text-delta")?.text ?? "";
+    assert.equal(text, `received ${Buffer.byteLength(raw, "utf8")} bytes`);
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "stop" } });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity maps a native run_command event into DSH bash", async () => {
@@ -1320,11 +1462,532 @@ test("Antigravity maps a native run_command event into DSH bash", async () => {
         type: "tool-call",
         id: chunks[3].block.id,
         name: "bash",
-        arguments: JSON.stringify({ command: "pwd", description: "Run the requested command", workdir: "/tmp" }),
+        arguments: JSON.stringify({ command: "pwd", description: "运行：pwd", workdir: "/tmp" }),
       },
     },
     { type: "finish", reason: { kind: "tool-calls" } },
   ]);
+});
+
+test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async () => {
+  // Payload copied from a real `agy --output-format stream-json` run: the CLI
+  // asks to read a URL, print mode cannot prompt, and the tool is auto-denied
+  // unless the intent is forwarded to a DSH tool first.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://moiraism.org" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity reads URLs through curl when the proxy answers DNS with fake IPs", async () => {
+  // A TUN proxy in fake-IP mode resolves every hostname to 198.18.0.0/15, which
+  // DSH's guarded web_fetch rejects before connecting. The connection itself is
+  // fine, so the URL read is routed through the request's own bash tool.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  assert.equal(call.name, "bash");
+  const parsed = JSON.parse(call.arguments);
+  // Transient TLS resets through a TUN proxy are retried, and the extractor runs
+  // Node (always present beside this plugin) with a sed-only fallback.
+  assert.match(parsed.command, /^curl -sSL --retry 2 --retry-connrefused --retry-delay 1 --max-time 30 --max-filesize 5000000 -- 'https:\/\/moiraism\.org\/'/);
+  assert.match(parsed.command, /command -v node >\/dev\/null 2>&1; then node -e '/);
+  assert.match(parsed.command, /else sed -e 's\/<\[\^>\]\*>\//);
+  assert.equal(parsed.description, "Fetch https://moiraism.org/ through the local network stack");
+});
+
+test("Antigravity reuses an already fetched URL instead of fetching it again", async () => {
+  const command = "curl -sSL --max-time 30 --max-filesize 5000000 -- 'https://moiraism.org/'";
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const history = [
+    { role: "user", content: [{ type: "text", text: "check my site" }] },
+    {
+      role: "assistant",
+      content: [{
+        type: "tool-call",
+        id: "agy-fetch-1",
+        name: "bash",
+        arguments: JSON.stringify({ command, description: "Fetch https://moiraism.org/ through the local network stack" }),
+      }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool-result", toolCallId: "agy-fetch-1", content: [{ type: "text", text: "MOIRAISM 首页正文 ".repeat(30) }] }],
+    },
+  ];
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: history,
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const parsed = JSON.parse(call.arguments);
+  assert.match(parsed.description, /^Reuse the fetched content of https:\/\/moiraism\.org\//);
+  assert.match(parsed.command, /^echo '/);
+  assert.equal(/curl /.test(parsed.command), false, "a successful fetch must not be repeated");
+});
+
+test("Antigravity still fetches when the previous attempt failed", async () => {
+  const command = "curl -sSL --max-time 30 --max-filesize 5000000 -- 'https://moiraism.org/'";
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://moiraism.org/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const history = [
+    { role: "user", content: [{ type: "text", text: "check my site" }] },
+    {
+      role: "assistant",
+      content: [{
+        type: "tool-call",
+        id: "agy-fetch-1",
+        name: "bash",
+        arguments: JSON.stringify({ command, description: "Fetch https://moiraism.org/ through the local network stack" }),
+      }],
+    },
+    {
+      role: "user",
+      content: [{
+        type: "tool-result",
+        toolCallId: "agy-fetch-1",
+        content: [{ type: "text", text: "[stderr]\ncurl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to moiraism.org:443 \n" }],
+      }],
+    },
+  ];
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: history,
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const parsed = JSON.parse(call.arguments);
+  assert.match(parsed.description, /^Fetch https:\/\/moiraism\.org\//);
+  assert.match(parsed.command, /^curl -sSL /);
+});
+
+test("Antigravity escapes quotes in the local fetch command", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => true,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url_content",
+          tool_info: { name: "read_url_content", parameters: { Url: "https://example.test/?q=it's; rm -rf /" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }, { name: "web_fetch" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const call = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call").block;
+  const command = JSON.parse(call.arguments).command;
+  // The whole URL stays inside one single-quoted shell word: no command runs.
+  assert.ok(command.includes(`'https://example.test/?q=it'\\''s; rm -rf /'`), command);
+});
+
+test("detectFakeIpEnvironment recognizes a virtualized resolver", async () => {
+  const fake = async () => [{ address: "198.19.0.33", family: 4 }];
+  const publicOnly = async () => [{ address: "93.184.216.34", family: 4 }];
+  const mixed = async () => [{ address: "93.184.216.34", family: 4 }, { address: "198.19.0.33", family: 4 }];
+  const failing = async () => {
+    throw new Error("no dns");
+  };
+  assert.equal(await detectFakeIpEnvironment({ resolver: fake, useCache: false, host: "probe-fake.test" }), true);
+  assert.equal(await detectFakeIpEnvironment({ resolver: async () => [{ address: "10.0.0.1", family: 4 }], useCache: false, host: "probe-private.test" }), true);
+  assert.equal(await detectFakeIpEnvironment({ resolver: publicOnly, useCache: false, host: "probe-public.test" }), false);
+  assert.equal(await detectFakeIpEnvironment({ resolver: mixed, useCache: false, host: "probe-mixed.test" }), false);
+  assert.equal(await detectFakeIpEnvironment({ resolver: failing, useCache: false, host: "probe-error.test" }), false);
+});
+
+test("Antigravity maps the CLI search_web tool into DSH web_search", async () => {
+  // Payload copied from a real `agy --output-format stream-json` run: the CLI
+  // searches with a single `query` string, while DSH's web_search requires
+  // `queries: [...]`.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "search_web",
+          tool_info: { name: "search_web", parameters: { query: "site:moiraism.org" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_search", description: "Search the web", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_search",
+        arguments: JSON.stringify({ queries: ["site:moiraism.org"] }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity reports an auto-denied CLI tool instead of an empty response", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (_path, _args, options) {
+      options?.onStderr?.(
+        "jetski: no output produced — a tool required the \"read_url\" permission that headless mode cannot prompt for, so it was auto-denied.",
+      );
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response" },
+      });
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: "", denied_actions: [{ action: "read_url" }] },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // Drain until the executor reports the diagnosis.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT" && /read_url/.test(error.message),
+  );
+});
+
+test("Antigravity replays a tool round trip with the command and its call id", () => {
+  // Regression: the transcript once rendered tool-call arguments as
+  // "[object Object]" and dropped the call id from tool results, so the model
+  // could not tell which command had already run and re-issued it every turn.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "run pwd" }] },
+      {
+        role: "assistant",
+        content: [{
+          type: "tool-call",
+          id: "call_abc123",
+          name: "bash",
+          arguments: { command: "pwd", description: "Print the working directory" },
+        }],
+      },
+      {
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: "call_abc123",
+          content: [{ type: "text", text: "/Users/xzb" }],
+        }],
+      },
+    ],
+  });
+  assert.ok(!prompt.includes("[object Object]"), prompt);
+  assert.match(prompt, /\[tool call: bash id=call_abc123] \{"command":"pwd"/);
+  assert.match(prompt, /\[tool result for id=call_abc123]\n\/Users\/xzb/);
+});
+
+test("Antigravity prompt carries convergence rules for the stateless CLI turn", () => {
+  // Regression: the CLI is spawned once per turn with the whole transcript
+  // flattened into one prompt, so the model treated its own past tool calls as
+  // reference material — re-running similar commands every turn with zero
+  // prose and never converging on a final answer.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [{ role: "user", content: [{ type: "text", text: "run pwd" }] }],
+  });
+  assert.match(prompt, /不要重复执行相同或相似的命令/);
+  assert.match(prompt, /绝对不要在回复文本里书写工具调用/);
+  assert.match(prompt, /必须直接输出最终结论，禁止再发起任何工具调用/);
+  assert.match(prompt, /先用一句话向用户说明你要做什么/);
+  // The rules must not disturb the caller's system section.
+  assert.match(prompt, /system:\nBe concise\./);
+});
+
+test("Antigravity reports a silent empty run instead of an empty response", async () => {
+  // Regression: an empty turn used to end in an empty text block, which the
+  // route classified as EMPTY_RESPONSE and replayed five times — six agy
+  // processes and six full prompts for a turn that produced nothing.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response", usage: { input_tokens: 12, output_tokens: 3 } },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // The executor must fail the turn, never emit a bare empty message.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT"
+      && /没有产生任何可见文本/.test(error.message)
+      && /result\.status=SUCCESS/.test(error.message),
+  );
+});
+
+test("Antigravity harvests a permission denial reported as a tool step error", async () => {
+  // Newer CLI builds no longer fill `result.denied_actions`; the denial only
+  // appears as a step_update ERROR, which the old guard ignored. The CLI names
+  // the exact missing grant, and that path is what tells the user which
+  // allow-rule to add (a bare tool name is not actionable).
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ERROR",
+          step_index: 2,
+          step_type: "tool",
+          tool_name: "write_to_file",
+          tool_info: {
+            name: "write_to_file",
+            parameters: { TargetFile: "/tmp/x.txt" },
+            error: { type: "TOOL_ERROR", message: 'permission check failed for write_file "/tmp/x.txt": user denied permission for write_file(/private/tmp/x.txt)' },
+          },
+        },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "write a file" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // Drain until the denial diagnosis is raised.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT"
+      && /write_file\(\/private\/tmp\/x\.txt\)/.test(error.message),
+  );
+});
+
+test("Antigravity reports each step's tokens on a tool-call turn", async () => {
+  // Tool turns return before the cumulative `result` event, so the usage of the
+  // steps already executed must be summed and emitted with the tool call.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "DONE",
+          step_type: "agent_response",
+          usage: { input_tokens: 100, output_tokens: 10, thinking_tokens: 5, cache_read_tokens: 20 },
+        },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_info: { parameters: { CommandLine: "pwd" } },
+        },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks.at(-2), {
+    type: "usage",
+    usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5, cacheReadTokens: 20 },
+  });
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+});
+
+test("Antigravity fails a timed-out turn even when the CLI exits cleanly", {
+  // The fixture is a POSIX shell script spawned without an extension, which
+  // Windows cannot exec (spawn ENOENT).
+  skip: process.platform === "win32" ? "POSIX shell fixture" : false,
+}, async () => {
+  // Regression: agy exits 0 after SIGTERM, so a killed turn used to look like a
+  // completed empty response; the timeout must be checked before the exit code.
+  const dir = await mkdtemp(join(tmpdir(), "agy-timeout-"));
+  try {
+    const scriptPath = join(dir, "agy");
+    await writeFile(scriptPath, [
+      "#!/bin/sh",
+      // Exit 0 on SIGTERM like the real CLI, but take the sleeping child with
+      // us so the stdout pipe closes and the test does not wait it out.
+      "trap 'kill \"$child\" 2>/dev/null; exit 0' TERM",
+      `printf '%s\\n' '{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response"}}'`,
+      "sleep 30 &",
+      "child=$!",
+      "wait \"$child\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const executor = createAntigravityCliExecutor({ cliPath: scriptPath, env: process.env, timeoutMs: 400 });
+    const stream = await executor({
+      request: {
+        model: "gemini-live-medium",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+    });
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of stream) {
+          // The turn must end in a timeout failure, not an empty success.
+        }
+      },
+      (error) => error.code === "TIMEOUT" && /timed out after 400ms/.test(error.message),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity maps a selected effort to the exact returned model row", async () => {
@@ -2765,4 +3428,516 @@ test("Grok official CLI executor keeps streaming-json and live model selection",
   assert.ok(calls[0].args.includes("--model") && calls[0].args.includes("grok-live"));
   assert.ok(calls[0].args.includes("--reasoning-effort") && calls[0].args.includes("high"));
   assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Grok response"]);
+});
+
+test("Antigravity caps flattened history so mid-conversation turns stay in the verified regime", () => {
+  // Regression: a day-long session replayed the whole history in one prompt;
+  // agy's per-turn latency scales linearly with input, so the turn exceeded
+  // the executor's 300s kill and looked like a silent hang. The oldest
+  // message sections must be dropped until the prompt fits the cap, while
+  // system, rules, and the newest turns survive.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [
+      { role: "user", content: "old context ".repeat(4_000) },
+      { role: "assistant", content: "old answer ".repeat(4_000) },
+      { role: "user", content: "最新的问题" },
+    ],
+  });
+  assert.ok(Buffer.byteLength(prompt, "utf8") <= 60_000, `prompt too large: ${Buffer.byteLength(prompt, "utf8")}`);
+  assert.ok(prompt.includes("最新的问题"), "newest turn must survive");
+  assert.match(prompt, /system:\nBe concise\./);
+  assert.ok(!prompt.includes("old context ".repeat(50)), "oldest history must be trimmed");
+});
+
+// --- Session-anchor mode (docs/antigravity-persistent-bridge-design.md §8) ---
+
+function fakeAgyScript(options = {}) {
+  // A drop-in agy: emits init + result NDJSON, records argv and stdin, and can
+  // be told to fail specific invocation shapes.
+  return [
+    "#!/bin/sh",
+    `printf '%s\\n' "$@" >> ${JSON.stringify(options.argvLog)}`,
+    `cat >> ${JSON.stringify(options.stdinLog)}`,
+    ...(options.failAnchored ? [
+      `if grep -q -- --input-format ${JSON.stringify(options.argvLog)}; then exit 1; fi`,
+    ] : []),
+    `if grep -q -- --input-format ${JSON.stringify(options.argvLog)}; then`,
+    '  CID=$(head -c 4000 /dev/null; echo anchored-conv-id)',
+    '  printf \'{"event":"init","conversation_id":"anchored-conv-id"}\\n\'',
+    '  printf \'{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","text_delta":"anchored reply","usage":{"input_tokens":10,"output_tokens":2}}}\\n\'',
+    '  printf \'{"event":"result","result":{"conversation_id":"anchored-conv-id","status":"SUCCESS","response":"anchored reply","usage":{"input_tokens":10,"output_tokens":2}}}\\n\'',
+    'else',
+    '  printf \'{"event":"result","result":{"status":"SUCCESS","response":"legacy reply","usage":{"input_tokens":5,"output_tokens":1}}}\\n\'',
+    'fi',
+    "",
+  ].join("\n");
+}
+
+test("Antigravity session-anchor first turn creates a conversation and persists the mapping", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "/bin/echo", // replaced below by script path
+    streamCommandRunner: async function* (path, args, opts) {
+      // Pretend to be agy: first turn gets no --conversation.
+      assert.ok(!args.includes("--conversation"));
+      assert.ok(args.includes("--input-format"));
+      assert.ok(args.includes("--print-timeout"));
+      const payload = JSON.parse(opts.stdin.trim());
+      assert.equal(payload.event, "user");
+      assert.match(payload.message.content, /会话约定/);
+      assert.match(payload.message.content, /hello anchored/);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-1" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-1", status: "SUCCESS", response: "anchored reply", usage: { input_tokens: 10, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-1",
+      system: "Be concise.",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello anchored" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(chunks.at(-1).reason.kind, "stop");
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-1"].cid, "cid-1");
+  assert.equal(stored["dsh-session-1"].msgsLen, 1);
+});
+
+test("Antigravity session-anchor reattaches and sends only the tail", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      seenArgs.push(args);
+      const isReattach = args.includes("--conversation");
+      const payload = JSON.parse(opts.stdin.trim());
+      if (seenArgs.length === 1) {
+        assert.ok(!isReattach);
+        yield JSON.stringify({ event: "init", conversation_id: "cid-A" });
+        yield JSON.stringify({ event: "result", result: { conversation_id: "cid-A", status: "SUCCESS", response: "first", usage: { input_tokens: 1, output_tokens: 1 } } });
+        return;
+      }
+      assert.ok(isReattach);
+      assert.equal(args[args.indexOf("--conversation") + 1], "cid-A");
+      // Only the NEW user turn travels; history is agy's job now.
+      assert.equal(payload.message.content, "第二个问题");
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-A", status: "SUCCESS", response: "second", usage: { input_tokens: 2, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const base = { sessionId: "dsh-session-2", system: "Be concise." };
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "第一个问题" }] }] } })) { /* drain */ }
+  for await (const _c of await executor({ request: { ...base, messages: [
+    { role: "user", content: [{ type: "text", text: "第一个问题" }] },
+    { role: "assistant", content: [{ type: "text", text: "第一个回答" }] },
+    { role: "user", content: [{ type: "text", text: "第二个问题" }] },
+  ] } })) { /* drain */ }
+  assert.equal(seenArgs.length, 2);
+});
+
+test("Antigravity session-anchor starts a fresh conversation after a history edit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      seenArgs.push(args);
+      yield JSON.stringify({ event: "init", conversation_id: seenArgs.length === 1 ? "cid-orig" : "cid-new" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: seenArgs.length === 1 ? "cid-orig" : "cid-new", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const base = { sessionId: "dsh-session-3" };
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "原始问题" }] }] } })) { /* drain */ }
+  // The user edits the first message: the prefix no longer matches, so the
+  // anchor must NOT reattach (stale memory would answer the edited-away turn).
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "改写后的问题" }] }] } })) { /* drain */ }
+  assert.equal(seenArgs[1].includes("--conversation"), false);
+});
+
+test("Antigravity requests without a session id keep the legacy replay path", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      assert.ok(args[0] === "-p");
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+    anchorLogPath: join(tmpdir(), `agy-anchor-log-${Date.now()}.log`),
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "no session" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.match(JSON.stringify(chunks), /legacy reply/);
+});
+
+test("Antigravity anchored failure degrades to the legacy replay path", async () => {
+  let calls = 0;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      calls += 1;
+      if (args.includes("--input-format")) throw new Error("spawn failed");
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "degraded legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+    anchorLogPath: join(tmpdir(), `agy-anchor-log-${Date.now()}.log`),
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-4", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.match(JSON.stringify(chunks), /degraded legacy reply/);
+  // Two anchored attempts (the empty-retry policy) before the legacy replay.
+  assert.equal(calls, 3);
+});
+
+test("Antigravity session-anchor reads the session id from the invoke context", async () => {
+  // The harness puts the conversation handle in the context (runtime.stream's
+  // third argument), not on the request; the anchor must accept both or it
+  // silently never engages.
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-ctx-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      seenArgs.push(args);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-ctx" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-ctx", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] },
+    context: { sessionId: "dsh-session-ctx" },
+  });
+  for await (const _c of stream) { /* drain */ }
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-ctx"].cid, "cid-ctx");
+});
+
+test("Antigravity retries the anchored turn once before degrading to replay", async () => {
+  // Observed in the wild: agy occasionally returns SUCCESS with empty text
+  // (~10 events, ~14s). Retrying the anchor is far cheaper than a full replay,
+  // so the first empty run must not immediately fall back.
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-retry-"));
+  const storeFile = join(dir, "convs.json");
+  let calls = 0;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      calls += 1;
+      if (calls === 1) {
+        yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+        return;
+      }
+      yield JSON.stringify({ event: "init", conversation_id: "cid-retry" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-retry", status: "SUCCESS", response: "second attempt reply", usage: { input_tokens: 3, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-retry", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(calls, 2);
+  assert.match(JSON.stringify(chunks), /second attempt reply/);
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-retry"].cid, "cid-retry");
+});
+
+test("Antigravity recognises sideband requests (titles, compaction)", () => {
+  assert.equal(isAntigravitySidebandRequest({ purpose: "session-title" }), true);
+  assert.equal(isAntigravitySidebandRequest({ purpose: "compaction" }), true);
+  assert.equal(isAntigravitySidebandRequest({ purpose: "assistant" }), false);
+  assert.equal(isAntigravitySidebandRequest({}), false);
+  // Fallback marker for callers that do not forward `purpose`.
+  assert.equal(
+    isAntigravitySidebandRequest({ system: "Create a concise title for an AI coding-assistant session from the supplied human messages.\nMore." }),
+    true,
+  );
+});
+
+test("Antigravity never anchors a sideband request into the user conversation", async () => {
+  // A session-title run shares the conversation's sessionId; anchoring it would
+  // write the title prompt into agy's memory and burn the fast path.
+  const dir = await mkdtemp(join(tmpdir(), "agy-sideband-"));
+  const storeFile = join(dir, "convs.json");
+  const seen = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      seen.push(args);
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "Some Title", usage: { input_tokens: 5, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-sideband",
+      purpose: "session-title",
+      messages: [{ role: "user", content: [{ type: "text", text: "Generate the session title" }] }],
+    },
+  });
+  for await (const _c of stream) { /* drain */ }
+  assert.equal(seen[0].includes("--conversation"), false);
+  assert.equal(seen[0][0], "-p");
+  // No mapping may be created for the session by a sideband run.
+  await assert.rejects(readFile(storeFile, "utf8"));
+});
+
+test("Antigravity mirrors permission rules into agy settings before spawning", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-perm-"));
+  const settingsFile = join(dir, "settings.json");
+  await writeFile(settingsFile, JSON.stringify({ permissions: { allow: ["command(ls)", "custom(rule)"] } }), "utf8");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile,
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-perm", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  for await (const _c of stream) { /* drain */ }
+  const merged = JSON.parse(await readFile(settingsFile, "utf8"));
+  // User rules survive; the DSH-side baseline is appended.
+  assert.ok(merged.permissions.allow.includes("custom(rule)"));
+  assert.ok(merged.permissions.allow.includes("command(*)"));
+  assert.ok(merged.permissions.allow.includes("unsandboxed(*)"));
+  // A backup of the pre-merge file is kept next to it.
+  assert.ok((await readFile(`${settingsFile}.bak`, "utf8")).includes("custom(rule)"));
+});
+
+test("Antigravity permission mirroring can be disabled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-perm-off-"));
+  const settingsFile = join(dir, "settings.json");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile,
+    mirrorPermissions: false,
+  });
+  const stream = await executor({ request: { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] } });
+  for await (const _c of stream) { /* drain */ }
+  await assert.rejects(readFile(settingsFile, "utf8"));
+});
+
+test("Antigravity labels imported history so a model switch keeps context", () => {
+  // Regression: the first anchored turn flattened the foreign-model history into
+  // unlabelled prose, so the model could not tell its own answers from the
+  // user's questions and appeared to ignore the earlier conversation.
+  const rendered = antigravityHistoryImport([
+    { role: "user", content: [{ type: "text", text: "帮我看看登录流程" }] },
+    { role: "assistant", content: [{ type: "text", text: "先查 auth 模块" }] },
+    { role: "user", content: [{ type: "text", text: "那就继续" }] },
+  ]);
+  assert.match(rendered, /user:\n帮我看看登录流程/);
+  assert.match(rendered, /assistant:\n先查 auth 模块/);
+  assert.match(rendered, /user:\n那就继续/);
+});
+
+test("Antigravity caps the imported history and keeps the newest turns", () => {
+  const rendered = antigravityHistoryImport([
+    { role: "user", content: [{ type: "text", text: "OLD ".repeat(20_000) }] },
+    { role: "assistant", content: [{ type: "text", text: "OLD ANSWER ".repeat(20_000) }] },
+    { role: "user", content: [{ type: "text", text: "最新的问题" }] },
+  ]);
+  assert.ok(Buffer.byteLength(rendered, "utf8") <= 60_000, `import too large: ${Buffer.byteLength(rendered, "utf8")}`);
+  assert.match(rendered, /最新的问题/);
+  assert.ok(!rendered.includes("OLD ".repeat(100)), "oldest turns must be trimmed");
+});
+
+test("Antigravity sends a labelled import on the first anchored turn of an existing session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-import-"));
+  const storeFile = join(dir, "convs.json");
+  let sent = null;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      sent = JSON.parse(opts.stdin.trim()).message.content;
+      yield JSON.stringify({ event: "init", conversation_id: "cid-import" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-import", status: "SUCCESS", response: "ok", usage: { input_tokens: 3, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile: join(dir, "settings.json"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-import",
+      system: "Be concise.",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "历史问题" }] },
+        { role: "assistant", content: [{ type: "text", text: "历史回答" }] },
+        { role: "user", content: [{ type: "text", text: "新问题" }] },
+      ],
+    },
+  });
+  for await (const _c of stream) { /* drain */ }
+  assert.match(sent, /此前的对话历史/);
+  assert.match(sent, /user:\n历史问题/);
+  assert.match(sent, /assistant:\n历史回答/);
+  assert.match(sent, /user:\n新问题/);
+});
+
+test("Antigravity labels the tail when the user switched away and back", async () => {
+  // Scenario: the session already has an agy conversation, the user chats with
+  // another model for a turn, then returns. Those foreign turns sit in the tail
+  // and must be labelled, otherwise they read as one undifferentiated block.
+  const dir = await mkdtemp(join(tmpdir(), "agy-tail-label-"));
+  const sent = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      sent.push(JSON.parse(opts.stdin.trim()).message.content);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-tail" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-tail", status: "SUCCESS", response: "ok", usage: { input_tokens: 3, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile: join(dir, "settings.json"),
+  });
+  const base = { sessionId: "dsh-session-tail" };
+  const first = [{ role: "user", content: [{ type: "text", text: "第一问" }] }];
+  for await (const _c of await executor({ request: { ...base, messages: first } })) { /* drain */ }
+  // Turn two: agy's own reply to turn one, then a foreign-model answer and a
+  // new question. Only agy's reply may be dropped; the foreign one must stay.
+  for await (const _c of await executor({ request: { ...base, messages: [
+    ...first,
+    { role: "assistant", content: [{ type: "text", text: "agy 自己的回答" }] },
+    { role: "user", content: [{ type: "text", text: "切到别的模型问" }] },
+    { role: "assistant", content: [{ type: "text", text: "别的模型的回答" }] },
+    { role: "user", content: [{ type: "text", text: "接着问" }] },
+  ] } })) { /* drain */ }
+  assert.ok(!sent[1].includes("agy 自己的回答"), "agy's own reply must not be echoed back");
+  assert.match(sent[1], /assistant:\n别的模型的回答/);
+  assert.match(sent[1], /user:\n接着问/);
+});
+
+test("Antigravity drops a re-rendered duplicate from the final response", async () => {
+  // Observed in the wild: the CLI streamed the answer once, then its final
+  // `result.response` carried the same answer a second time re-rendered (the
+  // two copies differed only in ASCII box widths), and the append-only merge
+  // printed the whole reply twice.
+  const once = [
+    "已收到你的明确反馈！针对这 4 点整理如下：",
+    "",
+    "┌──────────────────────────────┐",
+    "│ [≡] ✦ 米云创作 | 图像 | 视频 │",
+    "└──────────────────────────────┘",
+    "",
+    "### 一、布局定稿\n" + "左栏 360px，输入框自顶向下撑开。".repeat(6),
+    "### 二、主题方案\n" + "深浅色 token 与圆角规范。".repeat(6),
+  ].join("\n");
+  const reRendered = once.replace(/─{10,}/g, "─".repeat(46)).replace("已收到", "已收到");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "ACTIVE", step_type: "agent_response", text_delta: once },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response", usage: { input_tokens: 10, output_tokens: 5 } },
+      });
+      // Final response repeats the same answer, reflowed.
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: `${once}\n${reRendered}`, usage: { input_tokens: 10, output_tokens: 5 } },
+      });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "定稿方案" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const text = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.equal(text.split("已收到你的明确反馈").length - 1, 1, "answer must appear exactly once");
+  assert.ok(text.includes("布局定稿"));
+});
+
+test("Antigravity repeat ratio ignores whitespace reflows but keeps new text", () => {
+  const a = "左栏 360px，输入框自顶向下撑开。".repeat(20);
+  const reflowed = a.replace(/，/g, "， ").replace(/。/g, "。 ");
+  assert.ok(antigravityRepeatRatio(a, reflowed) >= 0.8);
+  assert.ok(antigravityRepeatRatio(a, "完全不同的新内容。".repeat(40)) < 0.2);
+});
+
+test("Antigravity keeps streamed text when the upstream ends in ERROR", async () => {
+  // Observed: the upstream dropped streamGenerateContent with EOF after most of
+  // the answer had been generated; the turn then failed and threw away visible
+  // content. Partial text must survive, with a short explanation appended.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "ACTIVE", step_type: "agent_response", text_delta: "已经写完一大半的实现方案……" },
+      });
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "ERROR", response: "", error: "Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent\": EOF" },
+      });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "写方案" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const text = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.match(text, /已经写完一大半的实现方案/);
+  assert.match(text, /本轮被上游中断/);
+  assert.equal(chunks.at(-1).type, "finish");
+});
+
+test("Antigravity still fails a run that produced nothing before ERROR", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "ERROR", response: "", error: "upstream EOF" } });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "写方案" }] }] },
+  });
+  await assert.rejects(
+    async () => { for await (const _c of stream) { /* drain */ } },
+    (error) => error.code === "ANTIGRAVITY_CLI_FAILED",
+  );
+});
+
+test("Antigravity mirrors write_file so implementation turns are not auto-denied", () => {
+  // Denial observed in the wild: "user denied permission for write_file(...)"
+  // while the agent was implementing a plan.
+  assert.ok(ANTIGRAVITY_DEFAULT_ALLOW_RULES.includes("write_file(/)"));
 });

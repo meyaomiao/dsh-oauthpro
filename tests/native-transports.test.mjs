@@ -614,6 +614,86 @@ test("Grok token-validation errors mark the OAuth account unusable", async () =>
   );
 });
 
+test("fetchNativeResponse retries idempotent pre-response transient network errors", async () => {
+  let attempts = 0;
+  const response = await fetchNativeResponse("https://xai.test/v1/chat/completions", {
+    method: "POST",
+  }, {
+    providerId: "grok",
+    retryDelaysMs: [1, 1],
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new TypeError("fetch failed");
+        error.cause = new Error("connect ECONNRESET");
+        throw error;
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "ok",
+      };
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(response.status, 200);
+});
+
+test("fetchNativeResponse re-throws transient network error once retries are exhausted", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    fetchNativeResponse("https://xai.test/v1/chat/completions", {
+      method: "POST",
+    }, {
+      providerId: "grok",
+      maxRetries: 2,
+      retryDelaysMs: [1, 1],
+      fetchImpl: async () => {
+        attempts += 1;
+        const error = new TypeError("fetch failed");
+        error.cause = new Error("socket hang up");
+        throw error;
+      },
+    }),
+    (error) => {
+      assert.equal(error.networkError, true);
+      assert.match(error.message, /grok native request failed/);
+      return true;
+    },
+  );
+  assert.equal(attempts, 3);
+});
+
+test("Grok native transport maps mid-stream network termination to retryable TRANSPORT fault", async () => {
+  const executor = createGrokNativeExecutor({
+    endpoint: "https://xai.test/v1/chat/completions",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: (async function* stream() {
+        yield new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"start"}}]}
+
+`);
+        const err = new TypeError("fetch failed");
+        err.cause = new Error("other side closed");
+        throw err;
+      })(),
+    }),
+  });
+  await assert.rejects(
+    collect(await executor({
+      credential: { access: "grok-oauth" },
+      request: { model: "grok-4.5", messages: [{ role: "user", content: "Hi" }] },
+    })),
+    (error) => {
+      assert.equal(error.networkError, true);
+      assert.equal(error.code, "TRANSPORT");
+      assert.match(error.message, /stream was interrupted before completion|fetch failed/);
+      return true;
+    },
+  );
+});
+
 test("Cursor protocol preserves inline image data instead of a placeholder", () => {
   const encoded = encodeAgentRunRequest({
     model: "cursor-test",
