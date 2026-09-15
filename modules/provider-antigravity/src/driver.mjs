@@ -1600,6 +1600,7 @@ export function createAntigravityCliExecutor({
   detectFakeIp = detectFakeIpEnvironment,
   promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
   conversationStore = null,
+  anchorLogPath = null,
   // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
   // to the legacy replay path on any anchored failure, so default-on is safe.
   sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0",
@@ -1788,7 +1789,7 @@ export function createAntigravityCliExecutor({
     const anchorText = `${conversationIntro}${tail}`;
     if (!anchorText.trim()) return legacyStream();
 
-    const anchorLogFile = join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log");
+    const anchorLogFile = anchorLogPath ?? join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log");
     const anchoredStream = async function* () {
       const cid = continuation ? record.cid : null;
       const diagnostics = { events: 0, steps: 0, resultStatus: null, deniedActions: [], stderr: "" };

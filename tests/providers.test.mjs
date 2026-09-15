@@ -3480,6 +3480,7 @@ test("Antigravity session-anchor first turn creates a conversation and persists 
       yield JSON.stringify({ event: "result", result: { conversation_id: "cid-1", status: "SUCCESS", response: "anchored reply", usage: { input_tokens: 10, output_tokens: 2 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
   });
   const stream = await executor({
     request: {
@@ -3519,6 +3520,7 @@ test("Antigravity session-anchor reattaches and sends only the tail", async () =
       yield JSON.stringify({ event: "result", result: { conversation_id: "cid-A", status: "SUCCESS", response: "second", usage: { input_tokens: 2, output_tokens: 1 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
   });
   const base = { sessionId: "dsh-session-2", system: "Be concise." };
   for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "第一个问题" }] }] } })) { /* drain */ }
@@ -3542,6 +3544,7 @@ test("Antigravity session-anchor starts a fresh conversation after a history edi
       yield JSON.stringify({ event: "result", result: { conversation_id: seenArgs.length === 1 ? "cid-orig" : "cid-new", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
   });
   const base = { sessionId: "dsh-session-3" };
   for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "原始问题" }] }] } })) { /* drain */ }
@@ -3559,6 +3562,7 @@ test("Antigravity requests without a session id keep the legacy replay path", as
       yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+    anchorLogPath: join(tmpdir(), `agy-anchor-log-${Date.now()}.log`),
   });
   const stream = await executor({
     request: { messages: [{ role: "user", content: [{ type: "text", text: "no session" }] }] },
@@ -3578,6 +3582,7 @@ test("Antigravity anchored failure degrades to the legacy replay path", async ()
       yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "degraded legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+    anchorLogPath: join(tmpdir(), `agy-anchor-log-${Date.now()}.log`),
   });
   const stream = await executor({
     request: { sessionId: "dsh-session-4", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
@@ -3603,6 +3608,7 @@ test("Antigravity session-anchor reads the session id from the invoke context", 
       yield JSON.stringify({ event: "result", result: { conversation_id: "cid-ctx", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
     },
     conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
   });
   const stream = await executor({
     request: { messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] },
