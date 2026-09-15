@@ -20,6 +20,7 @@ import {
 } from "../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
+  createAntigravityConversationStore,
   createAntigravityCliExecutor,
   createAntigravityDriver,
   createAntigravityOAuthAuthorizer,
@@ -3435,4 +3436,153 @@ test("Antigravity caps flattened history so mid-conversation turns stay in the v
   assert.ok(prompt.includes("最新的问题"), "newest turn must survive");
   assert.match(prompt, /system:\nBe concise\./);
   assert.ok(!prompt.includes("old context ".repeat(50)), "oldest history must be trimmed");
+});
+
+// --- Session-anchor mode (docs/antigravity-persistent-bridge-design.md §8) ---
+
+function fakeAgyScript(options = {}) {
+  // A drop-in agy: emits init + result NDJSON, records argv and stdin, and can
+  // be told to fail specific invocation shapes.
+  return [
+    "#!/bin/sh",
+    `printf '%s\\n' "$@" >> ${JSON.stringify(options.argvLog)}`,
+    `cat >> ${JSON.stringify(options.stdinLog)}`,
+    ...(options.failAnchored ? [
+      `if grep -q -- --input-format ${JSON.stringify(options.argvLog)}; then exit 1; fi`,
+    ] : []),
+    `if grep -q -- --input-format ${JSON.stringify(options.argvLog)}; then`,
+    '  CID=$(head -c 4000 /dev/null; echo anchored-conv-id)',
+    '  printf \'{"event":"init","conversation_id":"anchored-conv-id"}\\n\'',
+    '  printf \'{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","text_delta":"anchored reply","usage":{"input_tokens":10,"output_tokens":2}}}\\n\'',
+    '  printf \'{"event":"result","result":{"conversation_id":"anchored-conv-id","status":"SUCCESS","response":"anchored reply","usage":{"input_tokens":10,"output_tokens":2}}}\\n\'',
+    'else',
+    '  printf \'{"event":"result","result":{"status":"SUCCESS","response":"legacy reply","usage":{"input_tokens":5,"output_tokens":1}}}\\n\'',
+    'fi',
+    "",
+  ].join("\n");
+}
+
+test("Antigravity session-anchor first turn creates a conversation and persists the mapping", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "/bin/echo", // replaced below by script path
+    streamCommandRunner: async function* (path, args, opts) {
+      // Pretend to be agy: first turn gets no --conversation.
+      assert.ok(!args.includes("--conversation"));
+      assert.ok(args.includes("--input-format"));
+      const payload = JSON.parse(opts.stdin.trim());
+      assert.equal(payload.event, "user");
+      assert.match(payload.message.content, /会话约定/);
+      assert.match(payload.message.content, /hello anchored/);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-1" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-1", status: "SUCCESS", response: "anchored reply", usage: { input_tokens: 10, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-1",
+      system: "Be concise.",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello anchored" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(chunks.at(-1).reason.kind, "stop");
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-1"].cid, "cid-1");
+  assert.equal(stored["dsh-session-1"].msgsLen, 1);
+});
+
+test("Antigravity session-anchor reattaches and sends only the tail", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      seenArgs.push(args);
+      const isReattach = args.includes("--conversation");
+      const payload = JSON.parse(opts.stdin.trim());
+      if (seenArgs.length === 1) {
+        assert.ok(!isReattach);
+        yield JSON.stringify({ event: "init", conversation_id: "cid-A" });
+        yield JSON.stringify({ event: "result", result: { conversation_id: "cid-A", status: "SUCCESS", response: "first", usage: { input_tokens: 1, output_tokens: 1 } } });
+        return;
+      }
+      assert.ok(isReattach);
+      assert.equal(args[args.indexOf("--conversation") + 1], "cid-A");
+      // Only the NEW user turn travels; history is agy's job now.
+      assert.equal(payload.message.content, "第二个问题");
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-A", status: "SUCCESS", response: "second", usage: { input_tokens: 2, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+  });
+  const base = { sessionId: "dsh-session-2", system: "Be concise." };
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "第一个问题" }] }] } })) { /* drain */ }
+  for await (const _c of await executor({ request: { ...base, messages: [
+    { role: "user", content: [{ type: "text", text: "第一个问题" }] },
+    { role: "assistant", content: [{ type: "text", text: "第一个回答" }] },
+    { role: "user", content: [{ type: "text", text: "第二个问题" }] },
+  ] } })) { /* drain */ }
+  assert.equal(seenArgs.length, 2);
+});
+
+test("Antigravity session-anchor starts a fresh conversation after a history edit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      seenArgs.push(args);
+      yield JSON.stringify({ event: "init", conversation_id: seenArgs.length === 1 ? "cid-orig" : "cid-new" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: seenArgs.length === 1 ? "cid-orig" : "cid-new", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+  });
+  const base = { sessionId: "dsh-session-3" };
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "原始问题" }] }] } })) { /* drain */ }
+  // The user edits the first message: the prefix no longer matches, so the
+  // anchor must NOT reattach (stale memory would answer the edited-away turn).
+  for await (const _c of await executor({ request: { ...base, messages: [{ role: "user", content: [{ type: "text", text: "改写后的问题" }] }] } })) { /* drain */ }
+  assert.equal(seenArgs[1].includes("--conversation"), false);
+});
+
+test("Antigravity requests without a session id keep the legacy replay path", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      assert.ok(args[0] === "-p");
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "no session" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.match(JSON.stringify(chunks), /legacy reply/);
+});
+
+test("Antigravity anchored failure degrades to the legacy replay path", async () => {
+  let calls = 0;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      calls += 1;
+      if (args.includes("--input-format")) throw new Error("spawn failed");
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "degraded legacy reply", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(tmpdir(), `agy-anchor-${Date.now()}.json`) }),
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-4", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.match(JSON.stringify(chunks), /degraded legacy reply/);
+  assert.equal(calls, 2);
 });

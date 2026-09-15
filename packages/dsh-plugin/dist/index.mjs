@@ -170,7 +170,7 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync, readFileSync as readFileSync3 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // packages/core/src/errors.mjs
@@ -3670,6 +3670,7 @@ function createCodexModule({ driver = {} } = {}) {
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
@@ -6053,6 +6054,76 @@ ${text4}`);
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }
+function antigravityConversationsFile(env = process.env, home = homedir4()) {
+  return process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || env?.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || join6(home, ".dockyard-dsh", "antigravity-conversations.json");
+}
+function createAntigravityConversationStore({ file, fsModule = null } = {}) {
+  const syncFs = fsModule ?? { readFileSync: readFileSync2, writeFileSync: writeFileSync2, mkdirSync: mkdirSync2, renameSync };
+  let cache = null;
+  const load = () => {
+    if (cache) return cache;
+    try {
+      const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+      cache = parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      cache = {};
+    }
+    return cache;
+  };
+  return {
+    get(key) {
+      if (!key) return null;
+      const value = load()[key];
+      return value && typeof value === "object" ? value : null;
+    },
+    set(key, value) {
+      if (!key || !value) return;
+      const data = load();
+      data[key] = value;
+      cache = data;
+      try {
+        syncFs.mkdirSync(dirname3(file), { recursive: true });
+        const tmp = `${file}.${randomUUID4()}.tmp`;
+        syncFs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+        syncFs.renameSync(tmp, file);
+      } catch {
+      }
+    }
+  };
+}
+function antigravityMessagesFingerprint(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return {
+    msgsLen: list.length,
+    msgsHash: createHash5("sha256").update(JSON.stringify(list)).digest("hex").slice(0, 32)
+  };
+}
+function antigravityTailText(messages, fromLen) {
+  const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
+  while (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+    list.shift();
+  }
+  const parts = [];
+  for (const message of list) {
+    const text4 = contentText(message?.content ?? message?.text);
+    if (text4) parts.push(text4);
+  }
+  return parts.join("\n\n");
+}
+function antigravityAnchorInvocation({ conversationId = null, text: text4 }) {
+  return {
+    args: [
+      ...conversationId ? ["--conversation", conversationId] : [],
+      "--input-format",
+      "stream-json"
+    ],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: typeof text4 === "string" ? text4 : String(text4 ?? "") }
+    })}
+`
+  };
+}
 var AGY_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024;
 function antigravityPromptInvocation(prompt, {
   thresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES
@@ -6403,7 +6474,11 @@ function createAntigravityCliExecutor({
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
   detectFakeIp = detectFakeIpEnvironment,
-  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES
+  promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+  conversationStore = null,
+  // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
+  // to the legacy replay path on any anchored failure, so default-on is safe.
+  sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0"
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -6418,7 +6493,7 @@ function createAntigravityCliExecutor({
       reasoningEffort: request.reasoningEffort
     });
     const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
-    return (async function* responseStream() {
+    const legacyStream = async function* () {
       const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
         thresholdBytes: promptStdinThresholdBytes
       });
@@ -6526,6 +6601,99 @@ function createAntigravityCliExecutor({
       const finalUsage = usage ?? stepUsage;
       if (finalUsage) yield { type: "usage", usage: finalUsage };
       yield { type: "finish", reason: { kind: "stop" } };
+    };
+    const sessionKey = typeof request.sessionId === "string" && request.sessionId.length > 0 ? request.sessionId : null;
+    if (!sessionAnchor || !sessionKey) return legacyStream();
+    const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const record = store.get(sessionKey);
+    const continuation = Boolean(
+      record && Number.isInteger(record.msgsLen) && record.msgsLen <= messages.length && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash
+    );
+    const tail = antigravityTailText(messages, continuation ? record.msgsLen : 0);
+    const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0 ? `\u4F1A\u8BDD\u7EA6\u5B9A\uFF08\u957F\u671F\u6709\u6548\uFF09\uFF1A
+${request.system}
+
+` : "";
+    const anchorText = `${conversationIntro}${tail}`;
+    if (!anchorText.trim()) return legacyStream();
+    const anchoredStream = async function* () {
+      const cid = continuation ? record.cid : null;
+      const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
+      const args = [...invocation.args];
+      if (typeof resolved.model === "string" && resolved.model.length > 0) {
+        args.push("--model", resolved.model);
+      }
+      if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
+        args.push("--effort", resolved.reasoningEffort);
+      }
+      args.push("--sandbox", "--output-format", "stream-json");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      let text4 = "";
+      let usage = null;
+      let seenConversationId = null;
+      for await (const line of streamCommandRunner(cliPath, args, {
+        env,
+        timeoutMs,
+        signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: () => {
+        }
+      })) {
+        const parsed = parseJsonOutput2(line);
+        if (!parsed) continue;
+        seenConversationId = seenConversationId ?? parsed.conversation_id ?? parsed.result?.conversation_id ?? parsed.step_update?.conversation_id ?? null;
+        for (const delta of streamEventTexts(parsed)) {
+          const next = appendDelta(text4, delta);
+          if (!next) continue;
+          text4 += next;
+          yield { type: "text-delta", index: 0, text: next };
+        }
+        const final = streamEventResult(parsed);
+        if (final) {
+          if (final.status && final.status !== "SUCCESS") {
+            const error = new Error("Antigravity CLI request did not complete");
+            error.code = "ANTIGRAVITY_CLI_FAILED";
+            error.detail = final.error ?? final.text ?? null;
+            throw error;
+          }
+          const next = appendDelta(text4, final.text);
+          if (next) {
+            text4 += next;
+            yield { type: "text-delta", index: 0, text: next };
+          }
+          usage = usageFromResponse(final.usage) ?? usage;
+        }
+        usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      if (text4.trim().length === 0 || request.signal?.aborted) {
+        const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
+        if (request.signal?.aborted) error.name = "AbortError";
+        throw error;
+      }
+      if (seenConversationId) {
+        store.set(sessionKey, {
+          cid: seenConversationId,
+          msgsLen: messages.length,
+          msgsHash: antigravityMessagesFingerprint(messages).msgsHash,
+          model: resolved.model ?? null
+        });
+      }
+      yield { type: "block-end", index: 0, block: { type: "text", text: text4 } };
+      if (usage) yield { type: "usage", usage };
+      yield { type: "finish", reason: { kind: "stop" } };
+    };
+    return (async function* () {
+      let yielded = false;
+      try {
+        for await (const chunk of anchoredStream()) {
+          if (chunk.type !== "block-start") yielded = true;
+          yield chunk;
+        }
+      } catch (error) {
+        if (yielded || error?.name === "AbortError") throw error;
+        yield* legacyStream();
+      }
     })();
   };
 }
@@ -14791,7 +14959,7 @@ function apply(ctx, config = {}) {
                   svg: "image/svg+xml"
                 };
                 const contentType = mimeTypes[ext] ?? "application/octet-stream";
-                const content = readFileSync2(filePath);
+                const content = readFileSync3(filePath);
                 res.writeHead(200, {
                   "Content-Type": contentType,
                   "Content-Length": content.length,

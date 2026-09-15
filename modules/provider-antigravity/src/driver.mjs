@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -984,6 +985,100 @@ export function antigravityRequestPrompt(request = {}) {
 }
 
 /**
+ * Session-anchor mode (final architecture, docs/antigravity-persistent-bridge-design.md §8).
+ *
+ * agy's `--conversation <id>` restores full in-process memory across processes
+ * (verified against agy 1.2.3), so each DSH conversation maps to one agy
+ * conversation id: the first turn creates it, later turns reattach. Memory
+ * lives in agy's local conversation store, so web restarts, model switches and
+ * process crashes no longer lose context. The legacy flattened-replay path
+ * below remains as the fallback for calls without a session id and for
+ * failures of the anchored path.
+ */
+export function antigravityConversationsFile(env = process.env, home = homedir()) {
+  return process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE
+    || env?.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE
+    || join(home, ".dockyard-dsh", "antigravity-conversations.json");
+}
+
+export function createAntigravityConversationStore({ file, fsModule = null } = {}) {
+  const syncFs = fsModule ?? { readFileSync, writeFileSync, mkdirSync, renameSync };
+  let cache = null;
+  const load = () => {
+    if (cache) return cache;
+    try {
+      const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+      cache = parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      cache = {};
+    }
+    return cache;
+  };
+  return {
+    get(key) {
+      if (!key) return null;
+      const value = load()[key];
+      return value && typeof value === "object" ? value : null;
+    },
+    set(key, value) {
+      if (!key || !value) return;
+      const data = load();
+      data[key] = value;
+      cache = data;
+      try {
+        syncFs.mkdirSync(dirname(file), { recursive: true });
+        const tmp = `${file}.${randomUUID()}.tmp`;
+        syncFs.writeFileSync(tmp, JSON.stringify(data), "utf8");
+        syncFs.renameSync(tmp, file);
+      } catch {
+        // Persistence is best-effort: losing the mapping only costs memory
+        // continuity, the next turn simply starts a fresh agy conversation.
+      }
+    },
+  };
+}
+
+export function antigravityMessagesFingerprint(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return {
+    msgsLen: list.length,
+    msgsHash: createHash("sha256").update(JSON.stringify(list)).digest("hex").slice(0, 32),
+  };
+}
+
+/**
+ * Flatten the messages newer than the anchored prefix into one user text.
+ * Leading assistant messages are skipped: they are agy's own replies, which
+ * its conversation memory already holds — replaying them would duplicate the
+ * model's own turns inside the anchored conversation.
+ */
+function antigravityTailText(messages, fromLen) {
+  const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
+  while (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+    list.shift();
+  }
+  const parts = [];
+  for (const message of list) {
+    const text = contentText(message?.content ?? message?.text);
+    if (text) parts.push(text);
+  }
+  return parts.join("\n\n");
+}
+
+export function antigravityAnchorInvocation({ conversationId = null, text }) {
+  return {
+    args: [
+      ...(conversationId ? ["--conversation", conversationId] : []),
+      "--input-format", "stream-json",
+    ],
+    stdin: `${JSON.stringify({
+      event: "user",
+      message: { role: "user", content: typeof text === "string" ? text : String(text ?? "") },
+    })}\n`,
+  };
+}
+
+/**
  * Prompt budget that still travels as `argv`.
  *
  * `execve` caps argv+env at `kern.argmax` (1 MiB on macOS) and, on Linux, caps
@@ -1477,6 +1572,10 @@ export function createAntigravityCliExecutor({
   streamCommandRunner = runStreamingCommand,
   detectFakeIp = detectFakeIpEnvironment,
   promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+  conversationStore = null,
+  // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
+  // to the legacy replay path on any anchored failure, so default-on is safe.
+  sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0",
 } = {}) {
   return async function executeAntigravity({ request = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
@@ -1496,7 +1595,7 @@ export function createAntigravityCliExecutor({
       .then(() => detectFakeIp())
       .then((value) => value === true)
       .catch(() => false);
-    return (async function* responseStream() {
+    const legacyStream = async function* () {
       const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
         thresholdBytes: promptStdinThresholdBytes,
       });
@@ -1632,6 +1731,122 @@ export function createAntigravityCliExecutor({
       const finalUsage = usage ?? stepUsage;
       if (finalUsage) yield { type: "usage", usage: finalUsage };
       yield { type: "finish", reason: { kind: "stop" } };
+    };
+
+    // --- Session-anchor path ---------------------------------------------
+    const sessionKey = typeof request.sessionId === "string" && request.sessionId.length > 0
+      ? request.sessionId
+      : null;
+    if (!sessionAnchor || !sessionKey) return legacyStream();
+
+    const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const record = store.get(sessionKey);
+    const continuation = Boolean(
+      record
+      && Number.isInteger(record.msgsLen)
+      && record.msgsLen <= messages.length
+      && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash,
+    );
+    // The tail since the anchored prefix is the only new content; replaying
+    // older messages would duplicate them inside the agy conversation.
+    const tail = antigravityTailText(messages, continuation ? record.msgsLen : 0);
+    const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0
+      ? `会话约定（长期有效）：\n${request.system}\n\n`
+      : "";
+    const anchorText = `${conversationIntro}${tail}`;
+    if (!anchorText.trim()) return legacyStream();
+
+    const anchoredStream = async function* () {
+      const cid = continuation ? record.cid : null;
+      const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
+      const args = [...invocation.args];
+      if (typeof resolved.model === "string" && resolved.model.length > 0) {
+        args.push("--model", resolved.model);
+      }
+      if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
+        args.push("--effort", resolved.reasoningEffort);
+      }
+      // agy owns tool execution in this mode (design §4.2/§8): the sandbox and
+      // its own permission settings govern commands, so tool step_updates are
+      // never forwarded into the DSH tool loop.
+      args.push("--sandbox", "--output-format", "stream-json");
+      yield { type: "block-start", index: 0, blockType: "text" };
+      let text = "";
+      let usage = null;
+      let seenConversationId = null;
+      for await (const line of streamCommandRunner(cliPath, args, {
+        env,
+        timeoutMs,
+        signal: request.signal,
+        stdin: invocation.stdin,
+        onStderr: () => {},
+      })) {
+        const parsed = parseJsonOutput(line);
+        if (!parsed) continue;
+        seenConversationId = seenConversationId
+          ?? parsed.conversation_id
+          ?? parsed.result?.conversation_id
+          ?? parsed.step_update?.conversation_id
+          ?? null;
+        for (const delta of streamEventTexts(parsed)) {
+          const next = appendDelta(text, delta);
+          if (!next) continue;
+          text += next;
+          yield { type: "text-delta", index: 0, text: next };
+        }
+        const final = streamEventResult(parsed);
+        if (final) {
+          if (final.status && final.status !== "SUCCESS") {
+            const error = new Error("Antigravity CLI request did not complete");
+            error.code = "ANTIGRAVITY_CLI_FAILED";
+            error.detail = final.error ?? final.text ?? null;
+            throw error;
+          }
+          const next = appendDelta(text, final.text);
+          if (next) {
+            text += next;
+            yield { type: "text-delta", index: 0, text: next };
+          }
+          usage = usageFromResponse(final.usage) ?? usage;
+        }
+        usage = usageFromResponse(parsed.usage) ?? usage;
+      }
+      if (text.trim().length === 0 || request.signal?.aborted) {
+        // Degrade: without visible output the replay path either succeeds with
+        // its richer diagnostics or surfaces the proper Chinese error.
+        const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
+        if (request.signal?.aborted) error.name = "AbortError";
+        throw error;
+      }
+      if (seenConversationId) {
+        store.set(sessionKey, {
+          cid: seenConversationId,
+          msgsLen: messages.length,
+          msgsHash: antigravityMessagesFingerprint(messages).msgsHash,
+          model: resolved.model ?? null,
+        });
+      }
+      yield { type: "block-end", index: 0, block: { type: "text", text } };
+      if (usage) yield { type: "usage", usage };
+      yield { type: "finish", reason: { kind: "stop" } };
+    };
+
+    return (async function* () {
+      let yielded = false;
+      try {
+        for await (const chunk of anchoredStream()) {
+          // A bare block-start carries no user-visible content: losing it to a
+          // replay retry is free, losing real text would duplicate it.
+          if (chunk.type !== "block-start") yielded = true;
+          yield chunk;
+        }
+      } catch (error) {
+        // A turn that already streamed content cannot be replayed without
+        // duplicating it; aborts and partial turns propagate as-is.
+        if (yielded || error?.name === "AbortError") throw error;
+        yield* legacyStream();
+      }
     })();
   };
 }
