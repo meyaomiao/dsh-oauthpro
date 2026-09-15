@@ -1132,6 +1132,8 @@ test("Antigravity catalog loader never reports a failed read while a previous ca
 });
 
 test("provider model metadata exposes only returned reasoning tiers", () => {
+  // Tier suffixes live in the id, so parse must not declare a second selector
+  // (Refs #65). Non-tier rows are unaffected.
   assert.deepEqual(parseAntigravityModelCatalog([
     "Fetching available models...",
     "gemini-live-low\tGemini Live (Low)",
@@ -1139,42 +1141,9 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
     "gemini-live-high\tGemini Live (High)",
     "claude-live\tClaude Live (Thinking)",
   ].join("\n")), [
-    {
-      id: "gemini-live-low",
-      name: "Gemini Live (Low)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "low",
-      },
-    },
-    {
-      id: "gemini-live-medium",
-      name: "Gemini Live (Medium)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "medium",
-      },
-    },
-    {
-      id: "gemini-live-high",
-      name: "Gemini Live (High)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "high",
-      },
-    },
+    { id: "gemini-live-low", name: "Gemini Live (Low)" },
+    { id: "gemini-live-medium", name: "Gemini Live (Medium)" },
+    { id: "gemini-live-high", name: "Gemini Live (High)" },
     { id: "claude-live", name: "Claude Live (Thinking)" },
   ]);
 
@@ -1205,13 +1174,6 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
     {
       id: "gemini-3.6-flash-high",
       name: "Gemini 3.6 Flash (High)",
-      reasoning: {
-        efforts: [
-          { id: "high", name: "High" },
-          { id: "medium", name: "Medium" },
-        ],
-        defaultEffort: "high",
-      },
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
@@ -1219,13 +1181,6 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
     {
       id: "gemini-3.6-flash-medium",
       name: "Gemini 3.6 Flash (Medium)",
-      reasoning: {
-        efforts: [
-          { id: "high", name: "High" },
-          { id: "medium", name: "Medium" },
-        ],
-        defaultEffort: "medium",
-      },
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
