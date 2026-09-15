@@ -6467,9 +6467,13 @@ function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
   // One print-mode turn carries the whole conversation and can legitimately run
-  // for minutes on a large context; the CLI's own --print-timeout defaults to
-  // 5m, so keep both boundaries aligned and overridable.
-  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 3e5,
+  // for minutes on a large context (measured: a trivial prompt already costs
+  // ~35s on gemini-3.8-flash-high). The CLI's own --print-timeout defaults to
+  // 5m, which killed healthy turns mid-flight and forced a full replay retry —
+  // doubling the cost of every slow turn. Widen both boundaries: agy aborts
+  // first with its own error, DSH kills a minute later as the outer guard.
+  printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
+  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 96e4,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
@@ -6504,7 +6508,7 @@ function createAntigravityCliExecutor({
       if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
         args.push("--effort", resolved.reasoningEffort);
       }
-      args.push("--sandbox", "--output-format", "stream-json");
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text4 = "";
       let usage = null;
@@ -6628,7 +6632,7 @@ ${request.system}
       if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort.length > 0) {
         args.push("--effort", resolved.reasoningEffort);
       }
-      args.push("--sandbox", "--output-format", "stream-json");
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text4 = "";
       let usage = null;

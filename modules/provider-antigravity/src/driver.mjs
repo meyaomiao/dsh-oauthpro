@@ -1564,9 +1564,13 @@ export function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
   // One print-mode turn carries the whole conversation and can legitimately run
-  // for minutes on a large context; the CLI's own --print-timeout defaults to
-  // 5m, so keep both boundaries aligned and overridable.
-  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 300_000,
+  // for minutes on a large context (measured: a trivial prompt already costs
+  // ~35s on gemini-3.8-flash-high). The CLI's own --print-timeout defaults to
+  // 5m, which killed healthy turns mid-flight and forced a full replay retry —
+  // doubling the cost of every slow turn. Widen both boundaries: agy aborts
+  // first with its own error, DSH kills a minute later as the outer guard.
+  printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
+  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 960_000,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
@@ -1609,7 +1613,7 @@ export function createAntigravityCliExecutor({
       // Print mode cannot open an interactive permission prompt. The sandbox
       // makes a native tool request deterministic; we translate its intent
       // into DSH's own tool loop before the CLI reaches its denial boundary.
-      args.push("--sandbox", "--output-format", "stream-json");
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text = "";
       let usage = null;
@@ -1774,7 +1778,7 @@ export function createAntigravityCliExecutor({
       // agy owns tool execution in this mode (design §4.2/§8): the sandbox and
       // its own permission settings govern commands, so tool step_updates are
       // never forwarded into the DSH tool loop.
-      args.push("--sandbox", "--output-format", "stream-json");
+      args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text = "";
       let usage = null;

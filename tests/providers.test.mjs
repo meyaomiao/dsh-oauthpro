@@ -1291,7 +1291,7 @@ test("Antigravity executor calls the official CLI with the selected model and ef
   });
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
-  assert.deepEqual(command.args.slice(-7), ["--model", "gemini-live-medium", "--effort", "medium", "--sandbox", "--output-format", "stream-json"]);
+  assert.deepEqual(command.args.slice(-9), ["--model", "gemini-live-medium", "--effort", "medium", "--sandbox", "--print-timeout", "900s", "--output-format", "stream-json"]);
   assert.equal(command.args[0], "-p");
   assert.match(command.args[1], /system:\nBe concise\./);
   assert.deepEqual(chunks, [
@@ -3471,6 +3471,7 @@ test("Antigravity session-anchor first turn creates a conversation and persists 
       // Pretend to be agy: first turn gets no --conversation.
       assert.ok(!args.includes("--conversation"));
       assert.ok(args.includes("--input-format"));
+      assert.ok(args.includes("--print-timeout"));
       const payload = JSON.parse(opts.stdin.trim());
       assert.equal(payload.event, "user");
       assert.match(payload.message.content, /会话约定/);
