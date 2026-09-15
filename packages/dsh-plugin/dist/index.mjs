@@ -6056,6 +6056,10 @@ ${text4}`);
 }
 var ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
   "read_file(/)",
+  // Writing is the whole point of an implementation turn; without this rule the
+  // CLI auto-denies every write_file call (observed: "user denied permission for
+  // write_file(/Users/xzb/Documents/.../package.json)") and the turn ends empty.
+  "write_file(/)",
   "command(*)",
   "unsandboxed(*)"
 ]);
@@ -6702,10 +6706,18 @@ function createAntigravityCliExecutor({
         if (final) {
           diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
           if (final.status && final.status !== "SUCCESS") {
-            const error = new Error("Antigravity CLI request did not complete");
-            error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = final.error ?? final.text ?? null;
-            throw error;
+            const detail = typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "");
+            if (text4.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail || final.text || null;
+              throw error;
+            }
+            const note = `
+
+> \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            text4 += note;
+            yield { type: "text-delta", index: 0, text: note };
           }
           let next = appendDelta(text4, final.text);
           if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {
@@ -6815,11 +6827,19 @@ ${request.system}
             diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
           }
           if (final.status && final.status !== "SUCCESS") {
-            const error = new Error("Antigravity CLI request did not complete");
-            error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = `${final.error ?? final.text ?? ""} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
-            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length });
-            throw error;
+            const detail = `${typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "")} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length, detail: detail.slice(0, 300) });
+            if (text4.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail;
+              throw error;
+            }
+            const note = `
+
+> \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            text4 += note;
+            yield { type: "text-delta", index: 0, text: note };
           }
           let next = appendDelta(text4, final.text);
           if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {

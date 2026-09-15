@@ -20,6 +20,7 @@ export function createAntigravityModule({ driver = {} } = {}) {
 
 export {
   AGY_PROMPT_STDIN_THRESHOLD_BYTES,
+  ANTIGRAVITY_DEFAULT_ALLOW_RULES,
   AntigravityOfficialCliDriver,
   AntigravityOfficialSessionDriver,
   antigravityAnchorInvocation,

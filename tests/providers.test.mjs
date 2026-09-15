@@ -23,6 +23,7 @@ import {
   synthesizeCodexPiAiModel,
 } from "../modules/provider-codex/src/index.mjs";
 import {
+  ANTIGRAVITY_DEFAULT_ALLOW_RULES,
   createAntigravityCatalogLoader,
   createAntigravityConversationStore,
   antigravityHistoryImport,
@@ -3889,4 +3890,54 @@ test("Antigravity repeat ratio ignores whitespace reflows but keeps new text", (
   const reflowed = a.replace(/，/g, "， ").replace(/。/g, "。 ");
   assert.ok(antigravityRepeatRatio(a, reflowed) >= 0.8);
   assert.ok(antigravityRepeatRatio(a, "完全不同的新内容。".repeat(40)) < 0.2);
+});
+
+test("Antigravity keeps streamed text when the upstream ends in ERROR", async () => {
+  // Observed: the upstream dropped streamGenerateContent with EOF after most of
+  // the answer had been generated; the turn then failed and threw away visible
+  // content. Partial text must survive, with a short explanation appended.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "ACTIVE", step_type: "agent_response", text_delta: "已经写完一大半的实现方案……" },
+      });
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "ERROR", response: "", error: "Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent\": EOF" },
+      });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "写方案" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const text = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.match(text, /已经写完一大半的实现方案/);
+  assert.match(text, /本轮被上游中断/);
+  assert.equal(chunks.at(-1).type, "finish");
+});
+
+test("Antigravity still fails a run that produced nothing before ERROR", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "ERROR", response: "", error: "upstream EOF" } });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "写方案" }] }] },
+  });
+  await assert.rejects(
+    async () => { for await (const _c of stream) { /* drain */ } },
+    (error) => error.code === "ANTIGRAVITY_CLI_FAILED",
+  );
+});
+
+test("Antigravity mirrors write_file so implementation turns are not auto-denied", () => {
+  // Denial observed in the wild: "user denied permission for write_file(...)"
+  // while the agent was implementing a plan.
+  assert.ok(ANTIGRAVITY_DEFAULT_ALLOW_RULES.includes("write_file(/)"));
 });

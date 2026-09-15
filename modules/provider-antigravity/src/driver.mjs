@@ -1001,6 +1001,10 @@ export function antigravityRequestPrompt(request = {}) {
  */
 export const ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
   "read_file(/)",
+  // Writing is the whole point of an implementation turn; without this rule the
+  // CLI auto-denies every write_file call (observed: "user denied permission for
+  // write_file(/Users/xzb/Documents/.../package.json)") and the turn ends empty.
+  "write_file(/)",
   "command(*)",
   "unsandboxed(*)",
 ]);
@@ -1910,10 +1914,18 @@ export function createAntigravityCliExecutor({
         if (final) {
           diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
           if (final.status && final.status !== "SUCCESS") {
-            const error = new Error("Antigravity CLI request did not complete");
-            error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = final.error ?? final.text ?? null;
-            throw error;
+            const detail = typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "");
+            // Same rule as the anchored path: never discard text the user can
+            // already see when the upstream drops the stream mid-answer.
+            if (text.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail || final.text || null;
+              throw error;
+            }
+            const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            text += note;
+            yield { type: "text-delta", index: 0, text: note };
           }
           let next = appendDelta(text, final.text);
           // The CLI re-renders the answer into its final response often enough
@@ -2057,11 +2069,21 @@ export function createAntigravityCliExecutor({
             diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
           }
           if (final.status && final.status !== "SUCCESS") {
-            const error = new Error("Antigravity CLI request did not complete");
-            error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = `${final.error ?? final.text ?? ""} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
-            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text.length });
-            throw error;
+            const detail = `${typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "")} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text.length, detail: detail.slice(0, 300) });
+            // A run that already produced visible text must not be discarded:
+            // the upstream can drop the stream (observed: streamGenerateContent
+            // "EOF") after most of the answer has been generated. Keep what the
+            // user can see and say why the run ended.
+            if (text.trim().length === 0) {
+              const error = new Error("Antigravity CLI request did not complete");
+              error.code = "ANTIGRAVITY_CLI_FAILED";
+              error.detail = detail;
+              throw error;
+            }
+            const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            text += note;
+            yield { type: "text-delta", index: 0, text: note };
           }
           let next = appendDelta(text, final.text);
           // The CLI re-renders the answer into its final response often enough
