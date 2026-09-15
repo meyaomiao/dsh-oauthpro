@@ -1945,7 +1945,11 @@ test("Antigravity reports each step's tokens on a tool-call turn", async () => {
   assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
 });
 
-test("Antigravity fails a timed-out turn even when the CLI exits cleanly", async () => {
+test("Antigravity fails a timed-out turn even when the CLI exits cleanly", {
+  // The fixture is a POSIX shell script spawned without an extension, which
+  // Windows cannot exec (spawn ENOENT).
+  skip: process.platform === "win32" ? "POSIX shell fixture" : false,
+}, async () => {
   // Regression: agy exits 0 after SIGTERM, so a killed turn used to look like a
   // completed empty response; the timeout must be checked before the exit code.
   const dir = await mkdtemp(join(tmpdir(), "agy-timeout-"));
