@@ -1449,7 +1449,7 @@ test("Antigravity maps a native run_command event into DSH bash", async () => {
         type: "tool-call",
         id: chunks[3].block.id,
         name: "bash",
-        arguments: JSON.stringify({ command: "pwd", description: "Run the requested command", workdir: "/tmp" }),
+        arguments: JSON.stringify({ command: "pwd", description: "运行：pwd", workdir: "/tmp" }),
       },
     },
     { type: "finish", reason: { kind: "tool-calls" } },
@@ -1769,6 +1769,207 @@ test("Antigravity reports an auto-denied CLI tool instead of an empty response",
     },
     (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT" && /read_url/.test(error.message),
   );
+});
+
+test("Antigravity replays a tool round trip with the command and its call id", () => {
+  // Regression: the transcript once rendered tool-call arguments as
+  // "[object Object]" and dropped the call id from tool results, so the model
+  // could not tell which command had already run and re-issued it every turn.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "run pwd" }] },
+      {
+        role: "assistant",
+        content: [{
+          type: "tool-call",
+          id: "call_abc123",
+          name: "bash",
+          arguments: { command: "pwd", description: "Print the working directory" },
+        }],
+      },
+      {
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: "call_abc123",
+          content: [{ type: "text", text: "/Users/xzb" }],
+        }],
+      },
+    ],
+  });
+  assert.ok(!prompt.includes("[object Object]"), prompt);
+  assert.match(prompt, /\[tool call: bash id=call_abc123] \{"command":"pwd"/);
+  assert.match(prompt, /\[tool result for id=call_abc123]\n\/Users\/xzb/);
+});
+
+test("Antigravity prompt carries convergence rules for the stateless CLI turn", () => {
+  // Regression: the CLI is spawned once per turn with the whole transcript
+  // flattened into one prompt, so the model treated its own past tool calls as
+  // reference material — re-running similar commands every turn with zero
+  // prose and never converging on a final answer.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [{ role: "user", content: [{ type: "text", text: "run pwd" }] }],
+  });
+  assert.match(prompt, /不要重复执行已经跑过的相同命令/);
+  assert.match(prompt, /必须直接输出最终结论，禁止再发起任何工具调用/);
+  assert.match(prompt, /先用一句话向用户说明你要做什么/);
+  // The rules must not disturb the caller's system section.
+  assert.match(prompt, /system:\nBe concise\./);
+});
+
+test("Antigravity reports a silent empty run instead of an empty response", async () => {
+  // Regression: an empty turn used to end in an empty text block, which the
+  // route classified as EMPTY_RESPONSE and replayed five times — six agy
+  // processes and six full prompts for a turn that produced nothing.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response", usage: { input_tokens: 12, output_tokens: 3 } },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // The executor must fail the turn, never emit a bare empty message.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT"
+      && /没有产生任何可见文本/.test(error.message)
+      && /result\.status=SUCCESS/.test(error.message),
+  );
+});
+
+test("Antigravity harvests a permission denial reported as a tool step error", async () => {
+  // Newer CLI builds no longer fill `result.denied_actions`; the denial only
+  // appears as a step_update ERROR, which the old guard ignored. The CLI names
+  // the exact missing grant, and that path is what tells the user which
+  // allow-rule to add (a bare tool name is not actionable).
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ERROR",
+          step_index: 2,
+          step_type: "tool",
+          tool_name: "write_to_file",
+          tool_info: {
+            name: "write_to_file",
+            parameters: { TargetFile: "/tmp/x.txt" },
+            error: { type: "TOOL_ERROR", message: 'permission check failed for write_file "/tmp/x.txt": user denied permission for write_file(/private/tmp/x.txt)' },
+          },
+        },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      messages: [{ role: "user", content: [{ type: "text", text: "write a file" }] }],
+    },
+  });
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of stream) {
+        // Drain until the denial diagnosis is raised.
+      }
+    },
+    (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT"
+      && /write_file\(\/private\/tmp\/x\.txt\)/.test(error.message),
+  );
+});
+
+test("Antigravity reports each step's tokens on a tool-call turn", async () => {
+  // Tool turns return before the cumulative `result` event, so the usage of the
+  // steps already executed must be summed and emitted with the tool call.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "DONE",
+          step_type: "agent_response",
+          usage: { input_tokens: 100, output_tokens: 10, thinking_tokens: 5, cache_read_tokens: 20 },
+        },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_info: { parameters: { CommandLine: "pwd" } },
+        },
+      });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks.at(-2), {
+    type: "usage",
+    usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5, cacheReadTokens: 20 },
+  });
+  assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+});
+
+test("Antigravity fails a timed-out turn even when the CLI exits cleanly", async () => {
+  // Regression: agy exits 0 after SIGTERM, so a killed turn used to look like a
+  // completed empty response; the timeout must be checked before the exit code.
+  const dir = await mkdtemp(join(tmpdir(), "agy-timeout-"));
+  try {
+    const scriptPath = join(dir, "agy");
+    await writeFile(scriptPath, [
+      "#!/bin/sh",
+      // Exit 0 on SIGTERM like the real CLI, but take the sleeping child with
+      // us so the stdout pipe closes and the test does not wait it out.
+      "trap 'kill \"$child\" 2>/dev/null; exit 0' TERM",
+      `printf '%s\\n' '{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response"}}'`,
+      "sleep 30 &",
+      "child=$!",
+      "wait \"$child\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const executor = createAntigravityCliExecutor({ cliPath: scriptPath, env: process.env, timeoutMs: 400 });
+    const stream = await executor({
+      request: {
+        model: "gemini-live-medium",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+    });
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of stream) {
+          // The turn must end in a timeout failure, not an empty success.
+        }
+      },
+      (error) => error.code === "TIMEOUT" && /timed out after 400ms/.test(error.message),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity maps a selected effort to the exact returned model row", async () => {

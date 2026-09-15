@@ -44,6 +44,7 @@ export {
   createAntigravityNativeExecutor,
   createAntigravityNativeQuotaReader,
   createAntigravityProjectResolver,
+  invalidateAntigravityKeychainCache,
   parseAntigravityKeychainValue,
   readAntigravityKeychainToken,
   readAntigravityTokenFile,

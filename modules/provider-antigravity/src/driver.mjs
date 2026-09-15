@@ -31,6 +31,7 @@ import {
 } from "../../../packages/providers/src/session-source.mjs";
 import {
   createAntigravityNativeQuotaReader,
+  invalidateAntigravityKeychainCache,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
 } from "./native-transport.mjs";
@@ -269,17 +270,14 @@ function credentialRefreshMode(account) {
 }
 
 function cliFailure(code, signal, output, errorOutput) {
-  const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
-  error.code = code;
+  const error = new Error(`Antigravity CLI failed (${signal ?? code ?? "no exit status"})`);
+  error.code = code ?? "ANTIGRAVITY_CLI_EXIT";
   const structured = parseJsonOutput(output);
   const structuredDetail = structured?.error
     ?? structured?.response
     ?? structured?.result?.error
     ?? structured?.result?.response;
-  error.detail = String(errorOutput || structuredDetail || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 300);
+  error.detail = trimDetail(errorOutput || structuredDetail);
   return error;
 }
 
@@ -427,15 +425,43 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
       reader.close();
       terminate();
       clearTimeout(timer);
+      // Do not let the caller start the next turn while this CLI is still
+      // dying: a forwarded tool call ends the process with SIGTERM, and a fast
+      // tool (echo, a cached read) would otherwise race the shutdown — the CLI
+      // then answers the next turn with status "interrupted". Bounded by the
+      // SIGKILL escalation, and never longer than the grace period.
+      await Promise.race([closed, delay(2_000)]);
     }
     const result = await closed;
     const output = stdout.join("\n");
     const errorOutput = Buffer.concat(stderr).toString("utf8");
     if (spawnError) throw spawnError;
+    // A killed CLI can still report exit code 0 (`agy` exits cleanly on
+    // SIGTERM), so the timeout must be checked before the exit code or a
+    // half-finished turn is silently treated as a complete empty response.
+    if (timedOut) {
+      const timeoutError = new Error(`Antigravity CLI timed out after ${timeoutMs}ms`);
+      timeoutError.code = "TIMEOUT";
+      timeoutError.detail = trimDetail(errorOutput);
+      throw timeoutError;
+    }
     if (result.code !== 0) {
-      throw cliFailure(result.code, timedOut ? "SIGTERM" : result.signal, output, errorOutput);
+      throw cliFailure(result.code, result.signal, output, errorOutput);
     }
   })();
+}
+
+/** Bound one diagnostic string for error.detail without losing its head. */
+function trimDetail(value, limit = 300) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+/** Unref'd delay used to bound a best-effort wait. */
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 function normalizeToken(value) {
@@ -841,11 +867,29 @@ function contentText(value) {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join("\n");
   if (!value || typeof value !== "object") return "";
+  // Tool blocks must be recognized before the generic `content` unwrap below:
+  // a tool-result also owns a `content` array, which otherwise swallows the
+  // block and drops the call-id label that pairs output with its command.
+  if (value.type === "tool-call") {
+    // `arguments` is usually an object; string interpolation would render it as
+    // "[object Object]", hiding WHICH command the assistant already ran. The
+    // model then re-issues the identical call every turn and burns quota.
+    const args = typeof value.arguments === "string"
+      ? value.arguments
+      : JSON.stringify(value.arguments ?? {});
+    return `[tool call: ${value.name ?? "unknown"}${value.id ? ` id=${value.id}` : ""}] ${args}`;
+  }
+  if (value.type === "tool-result") {
+    const text = contentText(value.content);
+    // Label every result with its call id so the model can pair each output
+    // with the exact call above instead of guessing (and re-running it).
+    return value.toolCallId
+      ? `[tool result for id=${value.toolCallId}]\n${text}`
+      : text;
+  }
   if (typeof value.text === "string") return value.text;
   if (typeof value.content === "string" || Array.isArray(value.content)) return contentText(value.content);
   if (value.type === "image") return "[previous image attachment omitted by Antigravity CLI]";
-  if (value.type === "tool-call") return `[tool call: ${value.name ?? "unknown"}] ${value.arguments ?? ""}`;
-  if (value.type === "tool-result") return contentText(value.content);
   return "";
 }
 
@@ -890,11 +934,25 @@ function messagesWithinContext(request) {
   return [...systemMessages, ...selected];
 }
 
+// The CLI is spawned statelessly once per turn with the whole transcript
+// flattened into a single prompt. Without these rules the model treats its own
+// past "[tool call]" lines as reference material instead of completed work:
+// it re-runs similar commands every turn, never narrates, and never converges
+// on a final answer (the "endless silent Bash turns" incident).
+const ANTIGRAVITY_TRANSCRIPT_RULES = [
+  "rules:",
+  "- 历史中的 [tool call: ...] 是你上一轮已经执行过的动作，[tool result ...] 是它的输出；不要重复执行已经跑过的相同命令。",
+  "- 拿到最近的 [tool result] 后，如果信息已经足以回答用户，必须直接输出最终结论，禁止再发起任何工具调用。",
+  "- 每次发起工具调用前，先用一句话向用户说明你要做什么、为什么。",
+  "- 最终结论必须直接回应最初的用户问题，使用用户的语言，而不是复述调查过程。",
+].join("\n");
+
 export function antigravityRequestPrompt(request = {}) {
   const sections = [];
   if (typeof request.system === "string" && request.system.length > 0) {
     sections.push(`system:\n${request.system}`);
   }
+  sections.push(ANTIGRAVITY_TRANSCRIPT_RULES);
   for (const message of messagesWithinContext(request)) {
     const text = messageText(message);
     if (!text) continue;
@@ -945,13 +1003,31 @@ function usageFromResponse(usage) {
   const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
   const outputTokens = Number(usage.output_tokens ?? usage.outputTokens);
   if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+  // agy reports thinking separately as `thinking_tokens` and cached input as
+  // `cache_read_tokens`; DSH's TokenUsage keeps uncached input, cached input and
+  // reasoning disjoint, so dropping them made every turn look like it burned
+  // the whole prompt as fresh input.
+  const reasoning = Number(usage.thinking_tokens ?? usage.reasoning_tokens ?? usage.reasoningTokens);
+  const cacheRead = Number(usage.cache_read_tokens ?? usage.cacheReadTokens);
+  const cacheWrite = Number(usage.cache_write_tokens ?? usage.cacheWriteTokens);
   return {
     inputTokens,
     outputTokens,
-    ...(Number.isFinite(Number(usage.reasoning_tokens ?? usage.reasoningTokens))
-      ? { reasoningTokens: Number(usage.reasoning_tokens ?? usage.reasoningTokens) }
-      : {}),
+    ...(Number.isFinite(reasoning) ? { reasoningTokens: reasoning } : {}),
+    ...(Number.isFinite(cacheRead) ? { cacheReadTokens: cacheRead } : {}),
+    ...(Number.isFinite(cacheWrite) ? { cacheWriteTokens: cacheWrite } : {}),
   };
+}
+
+/** Sum two TokenUsage snapshots; agy reports per-step increments. */
+function addUsage(left, right) {
+  if (!right) return left ?? null;
+  if (!left) return { ...right };
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (Number.isFinite(value)) merged[key] = (Number.isFinite(merged[key]) ? merged[key] : 0) + value;
+  }
+  return merged;
 }
 
 function streamEventTexts(payload) {
@@ -1037,6 +1113,33 @@ function antigravityEmptyOutputError({ stderr = "", deniedActions = [] } = {}) {
   const error = new Error(message);
   error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
   error.detail = hint || null;
+  return error;
+}
+
+/**
+ * Explain a run that produced neither text nor a forwarded tool call and left
+ * no other trace.
+ *
+ * Returning such a turn as a plain empty message makes the harness classify it
+ * as EMPTY_RESPONSE and replay the whole ~85k-token prompt up to five times
+ * through five fresh CLI processes — the most expensive failure mode observed
+ * in production. Every empty turn therefore fails once, non-retryably, with the
+ * evidence this run actually collected.
+ */
+function antigravitySilentRunError({ stderr = "", events = 0, steps = 0, toolErrors = [], resultStatus = null } = {}) {
+  const errorMessages = [...new Set(toolErrors)].slice(0, 3).join("；");
+  const hint = typeof stderr === "string" ? stderr.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+  const observed = [
+    `解析到 ${events} 个事件、${steps} 个步骤`,
+    resultStatus ? `result.status=${resultStatus}` : "没有 result 事件",
+  ].join("，");
+  const detail = errorMessages || hint || null;
+  const message = detail
+    ? `Antigravity CLI 本轮没有产生任何可见文本（${observed}）：${detail}。为避免重复消耗额度，本轮不会自动重试；请重发一次，或换用其它模型。`
+    : `Antigravity CLI 本轮没有产生任何可见文本，也没有工具调用（${observed}）。这通常是上游偶发空回合；为避免重复消耗额度，本轮不会自动重试，请重发一次。`;
+  const error = new Error(message);
+  error.code = "ANTIGRAVITY_CLI_NO_OUTPUT";
+  error.detail = detail;
   return error;
 }
 
@@ -1272,7 +1375,11 @@ function toolCallFromEvent(payload, request, options = {}) {
         name: target.name,
         arguments: {
           command,
-          description: parameters.description ?? parameters.Description ?? "Run the requested command",
+          // agy's run_command never carries a description; show a command
+          // snippet instead of the opaque "Run the requested command" so the
+          // UI reflects what each forwarded call actually does.
+          description: parameters.description ?? parameters.Description
+            ?? `运行：${command.replace(/\s+/g, " ").trim().slice(0, 80)}`,
           ...(parameters.workdir ?? parameters.Cwd ? { workdir: parameters.workdir ?? parameters.Cwd } : {}),
           ...(parameters.timeoutMs ?? parameters.TimeoutMs ? { timeoutMs: parameters.timeoutMs ?? parameters.TimeoutMs } : {}),
         },
@@ -1334,7 +1441,10 @@ function appendDelta(current, next) {
 export function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
-  timeoutMs = 300_000,
+  // One print-mode turn carries the whole conversation and can legitimately run
+  // for minutes on a large context; the CLI's own --print-timeout defaults to
+  // 5m, so keep both boundaries aligned and overridable.
+  timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 300_000,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
@@ -1377,10 +1487,14 @@ export function createAntigravityCliExecutor({
       yield { type: "block-start", index: 0, blockType: "text" };
       let text = "";
       let usage = null;
+      // Per-step usage is incremental while the final `result.usage` is
+      // cumulative; keep a running sum so a turn that ends on a forwarded tool
+      // call still reports what it actually consumed.
+      let stepUsage = null;
       const handledTools = new Set();
       // Print mode explains itself on stderr (e.g. an auto-denied tool) and then
       // exits 0 with an empty response; keep a bounded copy for the diagnosis.
-      const diagnostics = { stderr: "", deniedActions: [] };
+      const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
         timeoutMs,
@@ -1392,6 +1506,32 @@ export function createAntigravityCliExecutor({
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
+        diagnostics.events += 1;
+        // Newer CLI builds report an auto-denied tool as a step_update ERROR
+        // (result still comes back SUCCESS with an empty response and no
+        // denied_actions), so harvest the denial here or the run looks like a
+        // bare empty response and the harness retries a deterministic failure.
+        const deniedUpdate = parsed?.step_update;
+        if (deniedUpdate && deniedUpdate.step_type === "tool" && String(deniedUpdate.state ?? "").toUpperCase() === "ERROR") {
+          const failureText = String(deniedUpdate.tool_info?.error?.message ?? "").trim();
+          if (failureText) diagnostics.toolErrors.push(failureText);
+          if (/permission/i.test(failureText)) {
+            // The CLI's message names the missing grant itself, e.g.
+            // `user denied permission for read_file(/private/tmp/x.txt)`. Keep
+            // that path: "read_file" alone does not tell the user which
+            // allow-rule to add, and /tmp resolves under /private on macOS.
+            const grant = /denied permission for (.+?)\)\s*$/.exec(failureText)?.[1];
+            const deniedName = String(deniedUpdate.tool_name ?? deniedUpdate.tool_info?.name ?? "").trim();
+            const label = grant ? `${grant})` : deniedName;
+            if (label) diagnostics.deniedActions.push(label);
+          }
+        }
+        // Any state transition away from ACTIVE means the CLI reached a real
+        // step boundary, which is the cheapest signal that the run was alive.
+        if (deniedUpdate && String(deniedUpdate.state ?? "").toUpperCase() !== "ACTIVE") {
+          diagnostics.steps += 1;
+          stepUsage = addUsage(stepUsage, usageFromResponse(deniedUpdate.usage));
+        }
         const tool = toolCallFromEvent(parsed, request, { preferLocalUrlFetch });
         if (tool) {
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
@@ -1409,6 +1549,11 @@ export function createAntigravityCliExecutor({
               arguments: JSON.stringify(tool.arguments),
             },
           };
+          // Token accounting must not depend on how the turn ended: a tool
+          // round trip still consumed the prompt, and dropping its usage made
+          // the ledger under-report every tool-heavy conversation.
+          const reported = usage ?? stepUsage;
+          if (reported) yield { type: "usage", usage: reported };
           yield { type: "finish", reason: { kind: "tool-calls" } };
           return;
         }
@@ -1420,8 +1565,10 @@ export function createAntigravityCliExecutor({
         }
         const final = streamEventResult(parsed);
         if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
           if (final.status && final.status !== "SUCCESS") {
             const error = new Error("Antigravity CLI request did not complete");
+            error.code = "ANTIGRAVITY_CLI_FAILED";
             error.detail = final.error ?? final.text ?? null;
             throw error;
           }
@@ -1437,15 +1584,26 @@ export function createAntigravityCliExecutor({
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
-      if (text.length === 0) {
+      // Whitespace-only text is not visible content downstream either, so it
+      // must take the same single-failure path as a fully empty run.
+      if (text.trim().length === 0) {
+        // A cancelled turn is not a provider failure: report the abort instead
+        // of an empty response, which the harness would otherwise replay.
+        if (request.signal?.aborted) {
+          const aborted = new Error("Antigravity CLI run was cancelled");
+          aborted.name = "AbortError";
+          throw aborted;
+        }
         // Nothing visible was produced: surface the CLI's own explanation
         // instead of letting the harness report a bare empty response (and
         // retry a deterministic failure).
         const emptyOutput = antigravityEmptyOutputError(diagnostics);
         if (emptyOutput) throw emptyOutput;
+        throw antigravitySilentRunError(diagnostics);
       }
       yield { type: "block-end", index: 0, block: { type: "text", text } };
-      if (usage) yield { type: "usage", usage };
+      const finalUsage = usage ?? stepUsage;
+      if (finalUsage) yield { type: "usage", usage: finalUsage };
       yield { type: "finish", reason: { kind: "stop" } };
     })();
   };
@@ -2214,6 +2372,9 @@ export class AntigravityOfficialSessionDriver {
       if (credentialRef && typeof context.secretStore?.write === "function") {
         await context.secretStore.write(credentialRef, nextCredential);
       }
+      // The Keychain now holds the rotated session, so the cached copy must go:
+      // a stale read would fail the fingerprint check on the very next turn.
+      invalidateAntigravityKeychainCache();
       return { session: refreshed, credential: nextCredential, rotated: true };
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -2284,6 +2445,7 @@ export class AntigravityOfficialSessionDriver {
       if (!accessChanged && !expiryAdvanced) {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
+      invalidateAntigravityKeychainCache();
       return next;
     } catch (error) {
       if (error?.authExpired) throw error;
@@ -2454,6 +2616,8 @@ export class AntigravityOfficialSessionDriver {
     if (!session) throw new Error("Antigravity candidate is no longer available; scan again");
     if (!context.secretStore) throw new Error("A secure credential store is required");
     await context.secretStore.write(value.credentialRef, session);
+    // A newly imported account makes any cached Keychain read ambiguous.
+    invalidateAntigravityKeychainCache();
     return {
       providerId: PROVIDER_ID,
       accountId: value.accountId,
