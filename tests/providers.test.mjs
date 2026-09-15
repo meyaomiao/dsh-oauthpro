@@ -3590,7 +3590,8 @@ test("Antigravity anchored failure degrades to the legacy replay path", async ()
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
   assert.match(JSON.stringify(chunks), /degraded legacy reply/);
-  assert.equal(calls, 2);
+  // Two anchored attempts (the empty-retry policy) before the legacy replay.
+  assert.equal(calls, 3);
 });
 
 test("Antigravity session-anchor reads the session id from the invoke context", async () => {
@@ -3617,4 +3618,36 @@ test("Antigravity session-anchor reads the session id from the invoke context", 
   for await (const _c of stream) { /* drain */ }
   const stored = JSON.parse(await readFile(storeFile, "utf8"));
   assert.equal(stored["dsh-session-ctx"].cid, "cid-ctx");
+});
+
+test("Antigravity retries the anchored turn once before degrading to replay", async () => {
+  // Observed in the wild: agy occasionally returns SUCCESS with empty text
+  // (~10 events, ~14s). Retrying the anchor is far cheaper than a full replay,
+  // so the first empty run must not immediately fall back.
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-retry-"));
+  const storeFile = join(dir, "convs.json");
+  let calls = 0;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      calls += 1;
+      if (calls === 1) {
+        yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "" } });
+        return;
+      }
+      yield JSON.stringify({ event: "init", conversation_id: "cid-retry" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-retry", status: "SUCCESS", response: "second attempt reply", usage: { input_tokens: 3, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-retry", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(calls, 2);
+  assert.match(JSON.stringify(chunks), /second attempt reply/);
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-retry"].cid, "cid-retry");
 });

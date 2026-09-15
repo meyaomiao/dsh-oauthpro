@@ -6735,21 +6735,32 @@ ${request.system}
     };
     return (async function* () {
       let yielded = false;
-      try {
-        for await (const chunk of anchoredStream()) {
-          if (chunk.type !== "block-start") yielded = true;
-          yield chunk;
+      let lastError = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          for await (const chunk of anchoredStream()) {
+            if (chunk.type !== "block-start") yielded = true;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          if (yielded || error?.name === "AbortError") throw error;
+          appendAntigravityAnchorLog(anchorLogFile, {
+            kind: "anchor_attempt_failed",
+            sessionKey,
+            attempt,
+            reason: String(error?.code ?? error?.message ?? error).slice(0, 200)
+          });
         }
-      } catch (error) {
-        appendAntigravityAnchorLog(anchorLogFile, {
-          kind: "anchor_degraded",
-          sessionKey,
-          yielded,
-          reason: String(error?.code ?? error?.message ?? error).slice(0, 200)
-        });
-        if (yielded || error?.name === "AbortError") throw error;
-        yield* legacyStream();
       }
+      appendAntigravityAnchorLog(anchorLogFile, {
+        kind: "anchor_degraded",
+        sessionKey,
+        yielded,
+        reason: String(lastError?.code ?? lastError?.message ?? lastError).slice(0, 200)
+      });
+      yield* legacyStream();
     })();
   };
 }

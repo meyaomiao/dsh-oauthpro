@@ -227,3 +227,36 @@ P0 必须产出结论的清单从 3 项扩为 **6 项**：Q1（工具回传事�
 - **P2（半天）**：真机联调——长会话中途切换、web 重启续聊、切模型、abort；sessionId 传递冒烟；成本对比实测（G8）。
 - **P3**：清理 legacy 打平路径、探明 Q1（若未来要做 DSH 工具接管）。
 
+
+---
+
+## 9. P2 真机联调结论（2026-09-15 晚）
+
+会话锚点模式在真实 GUI 会话（session-ef98308d）验证通过。诊断日志
+`~/.dockyard-dsh/antigravity-anchor.log` 的三轮记录：
+
+| 时间 | 结果 | cid | events | 文本 | 耗时 |
+|---|---|---|---|---|---|
+| 20:02:46 | ✅ anchored_ok（新建会话） | — | 157 | 1884 字 | 39.6s |
+| 20:04:45 | ⚠️ anchored_empty（10 events SUCCESS 空文本）→ 降级 legacy | 重附 | 10 | 0 | 14.3s |
+| 20:05:15 | ✅ anchored_ok（重附） | 重附 | 87 | 2066 字 | 12.7s |
+
+用户确认：回复在 GUI 可见；连续轮次（含工具命令）均有输出。
+
+对比修复前同一问题：静默无响应 / 4 分钟降级重放 → 现在 12–40 秒完整回答。
+
+### 9.1 联调中发现并修复的问题
+
+1. **sessionId 来源错误**（`7bd7e5c`）：harness 放在 invoke context 而非 request，锚点此前从未激活（映射文件不建立是铁证）。
+2. **超时边界过窄**（`4b74be8`）：实测该模型最小提问即需 28–35s；300s kill 会把健康慢轮次掐死并触发全量重放（双倍成本）。现为 agy `--print-timeout 900s` + DSH 960s。
+3. **静默失败不可诊断**（`a4d4ab3`）：加入有界诊断日志（events/steps/resultStatus/deniedActions/stderr/文本长度/耗时/降级原因）。
+4. **测试污染用户目录**（`5349154`）：锚定测试未隔离日志路径。
+5. **空轮次立即降级过重**（本轮）：改为**先原样重试一次锚定**，两次失败才降级重放；新增 `anchor_attempt_failed` 日志类型。
+6. **agy 权限表缺口**（运行环境侧）：`run_command` 需 `settings.json permissions.allow` 中有对应规则（已补 `command(git)` / `unsandboxed(git)`），否则 denied_actions → 空响应 → 降级。
+
+### 9.2 剩余事项
+
+- **G6 边带请求隔离**：会话标题生成（`session/title-llm-request`）也走 antigravity 执行器，占用一次完整慢调用；应改为短生命周期/独立 provider。
+- **权限镜像自动化**：目前靠人工往 agy settings.json 添加规则；终局是 spawn 时按 DSH 权限自动镜像（设计 §4.2）。
+- **P3 清理**：确认锚点稳定后，把 60KiB 截断与打平重放明确标记为降级路径并简化。
+- **Q1 工具回传事件**：仍未破解，仅影响未来「DSH 接管工具」的 C 方案演进。

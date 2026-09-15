@@ -1890,22 +1890,35 @@ export function createAntigravityCliExecutor({
 
     return (async function* () {
       let yielded = false;
-      try {
-        for await (const chunk of anchoredStream()) {
-          // A bare block-start carries no user-visible content: losing it to a
-          // replay retry is free, losing real text would duplicate it.
-          if (chunk.type !== "block-start") yielded = true;
-          yield chunk;
+      let lastError = null;
+      // An empty anchored run is usually an upstream hiccup (observed in the
+      // wild: a 10-event SUCCESS with empty text, ~14s). Retrying the anchor
+      // costs one cheap extra spawn and keeps the fast path; only a second
+      // failure pays for a full replay.
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          for await (const chunk of anchoredStream()) {
+            // A bare block-start carries no user-visible content: losing it to a
+            // replay retry is free, losing real text would duplicate it.
+            if (chunk.type !== "block-start") yielded = true;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          // A turn that already streamed content cannot be replayed without
+          // duplicating it; aborts and partial turns propagate as-is.
+          if (yielded || error?.name === "AbortError") throw error;
+          appendAntigravityAnchorLog(anchorLogFile, {
+            kind: "anchor_attempt_failed", sessionKey, attempt,
+            reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
+          });
         }
-      } catch (error) {
-        // A turn that already streamed content cannot be replayed without
-        // duplicating it; aborts and partial turns propagate as-is.
-        appendAntigravityAnchorLog(anchorLogFile, {
-          kind: "anchor_degraded", sessionKey, yielded, reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
-        });
-        if (yielded || error?.name === "AbortError") throw error;
-        yield* legacyStream();
       }
+      appendAntigravityAnchorLog(anchorLogFile, {
+        kind: "anchor_degraded", sessionKey, yielded, reason: String(lastError?.code ?? lastError?.message ?? lastError).slice(0, 200),
+      });
+      yield* legacyStream();
     })();
   };
 }
