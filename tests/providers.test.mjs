@@ -3586,3 +3586,28 @@ test("Antigravity anchored failure degrades to the legacy replay path", async ()
   assert.match(JSON.stringify(chunks), /degraded legacy reply/);
   assert.equal(calls, 2);
 });
+
+test("Antigravity session-anchor reads the session id from the invoke context", async () => {
+  // The harness puts the conversation handle in the context (runtime.stream's
+  // third argument), not on the request; the anchor must accept both or it
+  // silently never engages.
+  const dir = await mkdtemp(join(tmpdir(), "agy-anchor-ctx-"));
+  const storeFile = join(dir, "convs.json");
+  const seenArgs = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      seenArgs.push(args);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-ctx" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-ctx", status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] },
+    context: { sessionId: "dsh-session-ctx" },
+  });
+  for await (const _c of stream) { /* drain */ }
+  const stored = JSON.parse(await readFile(storeFile, "utf8"));
+  assert.equal(stored["dsh-session-ctx"].cid, "cid-ctx");
+});

@@ -6480,7 +6480,7 @@ function createAntigravityCliExecutor({
   // to the legacy replay path on any anchored failure, so default-on is safe.
   sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0"
 } = {}) {
-  return async function executeAntigravity({ request = {} } = {}) {
+  return async function executeAntigravity({ request = {}, context = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
       throw unsupportedContentError2(
         PROVIDER_ID3,
@@ -6602,7 +6602,8 @@ function createAntigravityCliExecutor({
       if (finalUsage) yield { type: "usage", usage: finalUsage };
       yield { type: "finish", reason: { kind: "stop" } };
     };
-    const sessionKey = typeof request.sessionId === "string" && request.sessionId.length > 0 ? request.sessionId : null;
+    const rawSessionId = request.sessionId ?? context.sessionId;
+    const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : null;
     if (!sessionAnchor || !sessionKey) return legacyStream();
     const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
     const messages = Array.isArray(request.messages) ? request.messages : [];

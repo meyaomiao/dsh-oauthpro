@@ -1577,7 +1577,7 @@ export function createAntigravityCliExecutor({
   // to the legacy replay path on any anchored failure, so default-on is safe.
   sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0",
 } = {}) {
-  return async function executeAntigravity({ request = {} } = {}) {
+  return async function executeAntigravity({ request = {}, context = {} } = {}) {
     if (contentHasImageInCurrentTurn(request)) {
       throw unsupportedContentError(
         PROVIDER_ID,
@@ -1734,8 +1734,12 @@ export function createAntigravityCliExecutor({
     };
 
     // --- Session-anchor path ---------------------------------------------
-    const sessionKey = typeof request.sessionId === "string" && request.sessionId.length > 0
-      ? request.sessionId
+    // The harness passes the conversation handle in the invoke CONTEXT
+    // (runtime.stream(provider, request, { sessionId })); some callers also
+    // spread it onto the request. Accept both or the anchor never engages.
+    const rawSessionId = request.sessionId ?? context.sessionId;
+    const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0
+      ? rawSessionId
       : null;
     if (!sessionAnchor || !sessionKey) return legacyStream();
 
