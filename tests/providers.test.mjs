@@ -1,4 +1,8 @@
 import test from "node:test";
+// Never let the suite mirror permissions into (or read) the real user config:
+// executors that omit `settingsFile` default to ~/.gemini/antigravity-cli.
+process.env.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE ||= join(tmpdir(), `agy-test-settings-${process.pid}.json`);
+process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE ||= join(tmpdir(), `agy-test-convs-${process.pid}.json`);
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
