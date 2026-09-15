@@ -260,3 +260,17 @@ P0 必须产出结论的清单从 3 项扩为 **6 项**：Q1（工具回传事�
 - **权限镜像自动化**：目前靠人工往 agy settings.json 添加规则；终局是 spawn 时按 DSH 权限自动镜像（设计 §4.2）。
 - **P3 清理**：确认锚点稳定后，把 60KiB 截断与打平重放明确标记为降级路径并简化。
 - **Q1 工具回传事件**：仍未破解，仅影响未来「DSH 接管工具」的 C 方案演进。
+
+### 9.3 G6 边带请求隔离（2026-09-15）
+
+**证据**：`dsh-session-title-llm` 插件调用 `ctx.llm.stream({ ..., sessionId: request.session.id, purpose: "session-title" })`
+——标题请求与用户对话**共享同一个 sessionId**。在锚点模式下这意味着每次新建/首轮会话都会把
+「Create a concise title…」写进用户的 agy 会话记忆，并占用一次完整慢调用。
+
+**实现**：`isAntigravitySidebandRequest()` 识别 `purpose ∈ {session-title, compaction, session-summary}`
+（`purpose` 非 `assistant` 即视为边带；无 `purpose` 时回退到标题 system 提示词标记）。命中时：
+- 永不进入锚点路径（不读/不写 conversation 映射，不污染 agy 记忆）
+- 走一次性 `-p` 调用，超时上限收紧到 `DOCKYARD_ANTIGRAVITY_SIDEBAND_TIMEOUT_MS`（默认 120s）
+- 记录 `sideband_bypass` 诊断行（sessionKey + purpose）
+
+已验证：sessionId 相同 + purpose=session-title 时不会创建映射，且 argv 中无 `--conversation`。

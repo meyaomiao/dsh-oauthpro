@@ -21,6 +21,7 @@ import {
 import {
   createAntigravityCatalogLoader,
   createAntigravityConversationStore,
+  isAntigravitySidebandRequest,
   createAntigravityCliExecutor,
   createAntigravityDriver,
   createAntigravityOAuthAuthorizer,
@@ -3650,4 +3651,45 @@ test("Antigravity retries the anchored turn once before degrading to replay", as
   assert.match(JSON.stringify(chunks), /second attempt reply/);
   const stored = JSON.parse(await readFile(storeFile, "utf8"));
   assert.equal(stored["dsh-session-retry"].cid, "cid-retry");
+});
+
+test("Antigravity recognises sideband requests (titles, compaction)", () => {
+  assert.equal(isAntigravitySidebandRequest({ purpose: "session-title" }), true);
+  assert.equal(isAntigravitySidebandRequest({ purpose: "compaction" }), true);
+  assert.equal(isAntigravitySidebandRequest({ purpose: "assistant" }), false);
+  assert.equal(isAntigravitySidebandRequest({}), false);
+  // Fallback marker for callers that do not forward `purpose`.
+  assert.equal(
+    isAntigravitySidebandRequest({ system: "Create a concise title for an AI coding-assistant session from the supplied human messages.\nMore." }),
+    true,
+  );
+});
+
+test("Antigravity never anchors a sideband request into the user conversation", async () => {
+  // A session-title run shares the conversation's sessionId; anchoring it would
+  // write the title prompt into agy's memory and burn the fast path.
+  const dir = await mkdtemp(join(tmpdir(), "agy-sideband-"));
+  const storeFile = join(dir, "convs.json");
+  const seen = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args) {
+      seen.push(args);
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "Some Title", usage: { input_tokens: 5, output_tokens: 2 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-sideband",
+      purpose: "session-title",
+      messages: [{ role: "user", content: [{ type: "text", text: "Generate the session title" }] }],
+    },
+  });
+  for await (const _c of stream) { /* drain */ }
+  assert.equal(seen[0].includes("--conversation"), false);
+  assert.equal(seen[0][0], "-p");
+  // No mapping may be created for the session by a sideband run.
+  await assert.rejects(readFile(storeFile, "utf8"));
 });

@@ -26,6 +26,7 @@ export {
   antigravityConversationsFile,
   antigravityMessagesFingerprint,
   antigravityPromptInvocation,
+  isAntigravitySidebandRequest,
   antigravityRequestPrompt,
   createAntigravityConversationStore,
   createAntigravityCliExecutor,

@@ -6054,6 +6054,13 @@ ${text4}`);
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }
+var ANTIGRAVITY_TITLE_SYSTEM_MARKER = /^Create a concise title for an AI coding-assistant session/m;
+function isAntigravitySidebandRequest(request = {}) {
+  const purpose = typeof request?.purpose === "string" ? request.purpose.trim().toLowerCase() : "";
+  if (purpose.length > 0 && purpose !== "assistant") return true;
+  const system = typeof request?.system === "string" ? request.system.trim() : "";
+  return ANTIGRAVITY_TITLE_SYSTEM_MARKER.test(system);
+}
 function antigravityConversationsFile(env = process.env, home = homedir4()) {
   return process.env.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || env?.DOCKYARD_ANTIGRAVITY_CONVERSATIONS_FILE || join6(home, ".dockyard-dsh", "antigravity-conversations.json");
 }
@@ -6490,6 +6497,9 @@ function createAntigravityCliExecutor({
   // first with its own error, DSH kills a minute later as the outer guard.
   printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
   timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 96e4,
+  // Sideband turns (titles/summaries) are short and must not occupy the fast
+  // path with a full-length budget; a short ceiling fails them cheaply.
+  sidebandTimeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_SIDEBAND_TIMEOUT_MS) || 12e4,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
@@ -6514,6 +6524,8 @@ function createAntigravityCliExecutor({
       reasoningEffort: request.reasoningEffort
     });
     const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
+    const sideband = isAntigravitySidebandRequest(request);
+    const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
     const legacyStream = async function* () {
       const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
         thresholdBytes: promptStdinThresholdBytes
@@ -6534,7 +6546,7 @@ function createAntigravityCliExecutor({
       const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         signal: request.signal,
         stdin: invocation.stdin,
         onStderr: (chunk) => {
@@ -6625,7 +6637,15 @@ function createAntigravityCliExecutor({
     };
     const rawSessionId = request.sessionId ?? context.sessionId;
     const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : null;
-    if (!sessionAnchor || !sessionKey) return legacyStream();
+    if (!sessionAnchor || !sessionKey || sideband) {
+      if (sideband && (typeof request.purpose === "string" || isAntigravitySidebandRequest(request))) {
+        appendAntigravityAnchorLog(
+          anchorLogPath ?? join6(dirname3(antigravityConversationsFile(env)), "antigravity-anchor.log"),
+          { kind: "sideband_bypass", sessionKey, purpose: typeof request.purpose === "string" ? request.purpose : "(system-marker)" }
+        );
+      }
+      return legacyStream();
+    }
     const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
     const messages = Array.isArray(request.messages) ? request.messages : [];
     const record = store.get(sessionKey);

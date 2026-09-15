@@ -985,6 +985,24 @@ export function antigravityRequestPrompt(request = {}) {
 }
 
 /**
+ * Sideband requests are harness bookkeeping that happens to travel through the
+ * same provider+session: session titles (`purpose: "session-title"`) and
+ * compaction summaries (`purpose: "compaction"`). They must never touch the
+ * anchored agy conversation — a title prompt inside the user's memory is
+ * pollution — and they do not need the replay machinery beyond a plain
+ * one-shot run.
+ */
+const ANTIGRAVITY_SIDEBAND_PURPOSES = new Set(["session-title", "compaction", "session-summary"]);
+const ANTIGRAVITY_TITLE_SYSTEM_MARKER = /^Create a concise title for an AI coding-assistant session/m;
+
+export function isAntigravitySidebandRequest(request = {}) {
+  const purpose = typeof request?.purpose === "string" ? request.purpose.trim().toLowerCase() : "";
+  if (purpose.length > 0 && purpose !== "assistant") return true;
+  const system = typeof request?.system === "string" ? request.system.trim() : "";
+  return ANTIGRAVITY_TITLE_SYSTEM_MARKER.test(system);
+}
+
+/**
  * Session-anchor mode (final architecture, docs/antigravity-persistent-bridge-design.md §8).
  *
  * agy's `--conversation <id>` restores full in-process memory across processes
@@ -1594,6 +1612,9 @@ export function createAntigravityCliExecutor({
   // first with its own error, DSH kills a minute later as the outer guard.
   printTimeoutSeconds = Number(process.env.DOCKYARD_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS) || 900,
   timeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CHAT_TIMEOUT_MS) || 960_000,
+  // Sideband turns (titles/summaries) are short and must not occupy the fast
+  // path with a full-length budget; a short ceiling fails them cheaply.
+  sidebandTimeoutMs = Number(process.env.DOCKYARD_ANTIGRAVITY_SIDEBAND_TIMEOUT_MS) || 120_000,
   commandRunner = runCommand,
   catalogLoader = null,
   streamCommandRunner = runStreamingCommand,
@@ -1623,6 +1644,8 @@ export function createAntigravityCliExecutor({
       .then(() => detectFakeIp())
       .then((value) => value === true)
       .catch(() => false);
+    const sideband = isAntigravitySidebandRequest(request);
+    const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
     const legacyStream = async function* () {
       const invocation = antigravityPromptInvocation(antigravityRequestPrompt(request), {
         thresholdBytes: promptStdinThresholdBytes,
@@ -1651,7 +1674,7 @@ export function createAntigravityCliExecutor({
       const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         signal: request.signal,
         stdin: invocation.stdin,
         onStderr: (chunk) => {
@@ -1769,7 +1792,15 @@ export function createAntigravityCliExecutor({
     const sessionKey = typeof rawSessionId === "string" && rawSessionId.length > 0
       ? rawSessionId
       : null;
-    if (!sessionAnchor || !sessionKey) return legacyStream();
+    if (!sessionAnchor || !sessionKey || sideband) {
+      if (sideband && (typeof request.purpose === "string" || isAntigravitySidebandRequest(request))) {
+        appendAntigravityAnchorLog(
+          anchorLogPath ?? join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log"),
+          { kind: "sideband_bypass", sessionKey, purpose: typeof request.purpose === "string" ? request.purpose : "(system-marker)" },
+        );
+      }
+      return legacyStream();
+    }
 
     const store = conversationStore ?? createAntigravityConversationStore({ file: antigravityConversationsFile(env) });
     const messages = Array.isArray(request.messages) ? request.messages : [];
