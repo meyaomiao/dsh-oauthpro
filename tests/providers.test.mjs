@@ -3416,3 +3416,23 @@ test("Grok official CLI executor keeps streaming-json and live model selection",
   assert.ok(calls[0].args.includes("--reasoning-effort") && calls[0].args.includes("high"));
   assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Grok response"]);
 });
+
+test("Antigravity caps flattened history so mid-conversation turns stay in the verified regime", () => {
+  // Regression: a day-long session replayed the whole history in one prompt;
+  // agy's per-turn latency scales linearly with input, so the turn exceeded
+  // the executor's 300s kill and looked like a silent hang. The oldest
+  // message sections must be dropped until the prompt fits the cap, while
+  // system, rules, and the newest turns survive.
+  const prompt = antigravityRequestPrompt({
+    system: "Be concise.",
+    messages: [
+      { role: "user", content: "old context ".repeat(4_000) },
+      { role: "assistant", content: "old answer ".repeat(4_000) },
+      { role: "user", content: "最新的问题" },
+    ],
+  });
+  assert.ok(Buffer.byteLength(prompt, "utf8") <= 60_000, `prompt too large: ${Buffer.byteLength(prompt, "utf8")}`);
+  assert.ok(prompt.includes("最新的问题"), "newest turn must survive");
+  assert.match(prompt, /system:\nBe concise\./);
+  assert.ok(!prompt.includes("old context ".repeat(50)), "oldest history must be trimmed");
+});

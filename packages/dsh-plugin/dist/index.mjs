@@ -6030,18 +6030,26 @@ var ANTIGRAVITY_TRANSCRIPT_RULES = [
   "- \u6BCF\u6B21\u53D1\u8D77\u5DE5\u5177\u8C03\u7528\u524D\uFF0C\u5148\u7528\u4E00\u53E5\u8BDD\u5411\u7528\u6237\u8BF4\u660E\u4F60\u8981\u505A\u4EC0\u4E48\u3001\u4E3A\u4EC0\u4E48\u3002",
   "- \u6700\u7EC8\u7ED3\u8BBA\u5FC5\u987B\u76F4\u63A5\u56DE\u5E94\u6700\u521D\u7684\u7528\u6237\u95EE\u9898\uFF0C\u4F7F\u7528\u7528\u6237\u7684\u8BED\u8A00\uFF0C\u800C\u4E0D\u662F\u590D\u8FF0\u8C03\u67E5\u8FC7\u7A0B\u3002"
 ].join("\n");
+var AGY_PROMPT_HISTORY_BYTE_CAP = 6e4;
 function antigravityRequestPrompt(request = {}) {
-  const sections = [];
+  const header = [];
   if (typeof request.system === "string" && request.system.length > 0) {
-    sections.push(`system:
+    header.push(`system:
 ${request.system}`);
   }
-  sections.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  header.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  const messageSections = [];
   for (const message of messagesWithinContext(request)) {
     const text4 = messageText(message);
     if (!text4) continue;
-    sections.push(`${message?.role ?? "message"}:
+    messageSections.push(`${message?.role ?? "message"}:
 ${text4}`);
+  }
+  let sections = [...header, ...messageSections];
+  let drop = 0;
+  while (messageSections.length > 0 && Buffer.byteLength(sections.join("\n\n"), "utf8") > AGY_PROMPT_HISTORY_BYTE_CAP && drop < messageSections.length) {
+    drop += 1;
+    sections = [...header, ...messageSections.slice(drop)];
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }

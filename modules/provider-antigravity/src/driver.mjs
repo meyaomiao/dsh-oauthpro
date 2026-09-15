@@ -948,16 +948,37 @@ const ANTIGRAVITY_TRANSCRIPT_RULES = [
   "- 最终结论必须直接回应最初的用户问题，使用用户的语言，而不是复述调查过程。",
 ].join("\n");
 
+// Mid-conversation turns replay the whole flattened history in one prompt, and
+// agy's per-turn latency scales roughly linearly with that input (measured:
+// 113 KiB ≈ 46k tokens ≈ 27 s generation, before tool work). A day-long
+// session therefore blows past the executor's 300 s kill and looks like a
+// silent hang, while fresh (short) conversations work fine. Capping the
+// message history keeps every turn in the regime that is verified to work;
+// the system section and the newest turns always survive.
+export const AGY_PROMPT_HISTORY_BYTE_CAP = 60_000;
+
 export function antigravityRequestPrompt(request = {}) {
-  const sections = [];
+  const header = [];
   if (typeof request.system === "string" && request.system.length > 0) {
-    sections.push(`system:\n${request.system}`);
+    header.push(`system:\n${request.system}`);
   }
-  sections.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  header.push(ANTIGRAVITY_TRANSCRIPT_RULES);
+  const messageSections = [];
   for (const message of messagesWithinContext(request)) {
     const text = messageText(message);
     if (!text) continue;
-    sections.push(`${message?.role ?? "message"}:\n${text}`);
+    messageSections.push(`${message?.role ?? "message"}:\n${text}`);
+  }
+  // Drop the OLDEST message sections until the flattened prompt fits the cap.
+  let sections = [...header, ...messageSections];
+  let drop = 0;
+  while (
+    messageSections.length > 0
+    && Buffer.byteLength(sections.join("\n\n"), "utf8") > AGY_PROMPT_HISTORY_BYTE_CAP
+    && drop < messageSections.length
+  ) {
+    drop += 1;
+    sections = [...header, ...messageSections.slice(drop)];
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }
