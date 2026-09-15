@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1038,6 +1038,29 @@ export function createAntigravityConversationStore({ file, fsModule = null } = {
   };
 }
 
+/**
+ * Bounded per-turn diagnostics for the anchored path.
+ *
+ * The anchored turn degrades silently by design, so without this a failed turn
+ * looks exactly like "the model never answered" — the incident that motivated
+ * the whole session-anchor work. Each run appends one JSON line with the CLI's
+ * own evidence (events, result status, denied actions, stderr head, fallback
+ * reason); the file is truncated once it exceeds the cap.
+ */
+export const AGY_ANCHOR_LOG_MAX_BYTES = 512 * 1024;
+
+export function appendAntigravityAnchorLog(file, entry) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    let size = 0;
+    try { size = statSync(file).size; } catch { size = 0; }
+    if (size > AGY_ANCHOR_LOG_MAX_BYTES) writeFileSync(file, "", "utf8");
+    writeFileSync(file, `${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`, { encoding: "utf8", flag: "a" });
+  } catch {
+    // Diagnostics must never break a turn.
+  }
+}
+
 export function antigravityMessagesFingerprint(messages) {
   const list = Array.isArray(messages) ? messages : [];
   return {
@@ -1765,8 +1788,11 @@ export function createAntigravityCliExecutor({
     const anchorText = `${conversationIntro}${tail}`;
     if (!anchorText.trim()) return legacyStream();
 
+    const anchorLogFile = join(dirname(antigravityConversationsFile(env)), "antigravity-anchor.log");
     const anchoredStream = async function* () {
       const cid = continuation ? record.cid : null;
+      const diagnostics = { events: 0, steps: 0, resultStatus: null, deniedActions: [], stderr: "" };
+      const startedAt = Date.now();
       const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
       const args = [...invocation.args];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
@@ -1788,10 +1814,21 @@ export function createAntigravityCliExecutor({
         timeoutMs,
         signal: request.signal,
         stdin: invocation.stdin,
-        onStderr: () => {},
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 1_000) diagnostics.stderr += String(chunk);
+        },
       })) {
         const parsed = parseJsonOutput(line);
         if (!parsed) continue;
+        diagnostics.events += 1;
+        const stepUpdate = parsed?.step_update;
+        if (stepUpdate) {
+          diagnostics.steps += 1;
+          if (stepUpdate.step_type === "tool" && String(stepUpdate.state ?? "").toUpperCase() === "ERROR") {
+            diagnostics.steps += 0;
+            diagnostics.deniedActions.push(String(stepUpdate.tool_info?.error?.message ?? stepUpdate.tool_name ?? "").slice(0, 200));
+          }
+        }
         seenConversationId = seenConversationId
           ?? parsed.conversation_id
           ?? parsed.result?.conversation_id
@@ -1805,10 +1842,15 @@ export function createAntigravityCliExecutor({
         }
         const final = streamEventResult(parsed);
         if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
+          }
           if (final.status && final.status !== "SUCCESS") {
             const error = new Error("Antigravity CLI request did not complete");
             error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = final.error ?? final.text ?? null;
+            error.detail = `${final.error ?? final.text ?? ""} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text.length });
             throw error;
           }
           const next = appendDelta(text, final.text);
@@ -1821,12 +1863,17 @@ export function createAntigravityCliExecutor({
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
       if (text.trim().length === 0 || request.signal?.aborted) {
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchored_empty", sessionKey, cid, diagnostics, textLen: text.length,
+          aborted: Boolean(request.signal?.aborted), elapsedMs: Date.now() - startedAt,
+        });
         // Degrade: without visible output the replay path either succeeds with
         // its richer diagnostics or surfaces the proper Chinese error.
         const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
         if (request.signal?.aborted) error.name = "AbortError";
         throw error;
       }
+      appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_ok", sessionKey, cid, diagnostics, textLen: text.length, elapsedMs: Date.now() - startedAt });
       if (seenConversationId) {
         store.set(sessionKey, {
           cid: seenConversationId,
@@ -1852,6 +1899,9 @@ export function createAntigravityCliExecutor({
       } catch (error) {
         // A turn that already streamed content cannot be replayed without
         // duplicating it; aborts and partial turns propagate as-is.
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchor_degraded", sessionKey, yielded, reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
+        });
         if (yielded || error?.name === "AbortError") throw error;
         yield* legacyStream();
       }

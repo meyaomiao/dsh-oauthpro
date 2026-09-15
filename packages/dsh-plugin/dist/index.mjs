@@ -3670,7 +3670,7 @@ function createCodexModule({ driver = {} } = {}) {
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
@@ -6091,6 +6091,22 @@ function createAntigravityConversationStore({ file, fsModule = null } = {}) {
     }
   };
 }
+var AGY_ANCHOR_LOG_MAX_BYTES = 512 * 1024;
+function appendAntigravityAnchorLog(file, entry) {
+  try {
+    mkdirSync2(dirname3(file), { recursive: true });
+    let size = 0;
+    try {
+      size = statSync(file).size;
+    } catch {
+      size = 0;
+    }
+    if (size > AGY_ANCHOR_LOG_MAX_BYTES) writeFileSync2(file, "", "utf8");
+    writeFileSync2(file, `${JSON.stringify({ time: (/* @__PURE__ */ new Date()).toISOString(), ...entry })}
+`, { encoding: "utf8", flag: "a" });
+  } catch {
+  }
+}
 function antigravityMessagesFingerprint(messages) {
   const list = Array.isArray(messages) ? messages : [];
   return {
@@ -6622,8 +6638,11 @@ ${request.system}
 ` : "";
     const anchorText = `${conversationIntro}${tail}`;
     if (!anchorText.trim()) return legacyStream();
+    const anchorLogFile = join6(dirname3(antigravityConversationsFile(env)), "antigravity-anchor.log");
     const anchoredStream = async function* () {
       const cid = continuation ? record.cid : null;
+      const diagnostics = { events: 0, steps: 0, resultStatus: null, deniedActions: [], stderr: "" };
+      const startedAt = Date.now();
       const invocation = antigravityAnchorInvocation({ conversationId: cid, text: anchorText });
       const args = [...invocation.args];
       if (typeof resolved.model === "string" && resolved.model.length > 0) {
@@ -6642,11 +6661,21 @@ ${request.system}
         timeoutMs,
         signal: request.signal,
         stdin: invocation.stdin,
-        onStderr: () => {
+        onStderr: (chunk) => {
+          if (diagnostics.stderr.length < 1e3) diagnostics.stderr += String(chunk);
         }
       })) {
         const parsed = parseJsonOutput2(line);
         if (!parsed) continue;
+        diagnostics.events += 1;
+        const stepUpdate = parsed?.step_update;
+        if (stepUpdate) {
+          diagnostics.steps += 1;
+          if (stepUpdate.step_type === "tool" && String(stepUpdate.state ?? "").toUpperCase() === "ERROR") {
+            diagnostics.steps += 0;
+            diagnostics.deniedActions.push(String(stepUpdate.tool_info?.error?.message ?? stepUpdate.tool_name ?? "").slice(0, 200));
+          }
+        }
         seenConversationId = seenConversationId ?? parsed.conversation_id ?? parsed.result?.conversation_id ?? parsed.step_update?.conversation_id ?? null;
         for (const delta of streamEventTexts(parsed)) {
           const next = appendDelta(text4, delta);
@@ -6656,10 +6685,15 @@ ${request.system}
         }
         const final = streamEventResult(parsed);
         if (final) {
+          diagnostics.resultStatus = final.status ?? diagnostics.resultStatus;
+          if (Array.isArray(final.deniedActions) && final.deniedActions.length > 0) {
+            diagnostics.deniedActions = [...diagnostics.deniedActions, ...final.deniedActions.map((a) => String(a?.action ?? a?.display_name ?? a).slice(0, 120))];
+          }
           if (final.status && final.status !== "SUCCESS") {
             const error = new Error("Antigravity CLI request did not complete");
             error.code = "ANTIGRAVITY_CLI_FAILED";
-            error.detail = final.error ?? final.text ?? null;
+            error.detail = `${final.error ?? final.text ?? ""} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
+            appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length });
             throw error;
           }
           const next = appendDelta(text4, final.text);
@@ -6672,10 +6706,20 @@ ${request.system}
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
       if (text4.trim().length === 0 || request.signal?.aborted) {
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchored_empty",
+          sessionKey,
+          cid,
+          diagnostics,
+          textLen: text4.length,
+          aborted: Boolean(request.signal?.aborted),
+          elapsedMs: Date.now() - startedAt
+        });
         const error = new Error(request.signal?.aborted ? "Antigravity CLI run was cancelled" : "anchored turn produced no output");
         if (request.signal?.aborted) error.name = "AbortError";
         throw error;
       }
+      appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_ok", sessionKey, cid, diagnostics, textLen: text4.length, elapsedMs: Date.now() - startedAt });
       if (seenConversationId) {
         store.set(sessionKey, {
           cid: seenConversationId,
@@ -6696,6 +6740,12 @@ ${request.system}
           yield chunk;
         }
       } catch (error) {
+        appendAntigravityAnchorLog(anchorLogFile, {
+          kind: "anchor_degraded",
+          sessionKey,
+          yielded,
+          reason: String(error?.code ?? error?.message ?? error).slice(0, 200)
+        });
         if (yielded || error?.name === "AbortError") throw error;
         yield* legacyStream();
       }
