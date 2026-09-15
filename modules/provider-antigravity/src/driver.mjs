@@ -941,8 +941,9 @@ function messagesWithinContext(request) {
 // on a final answer (the "endless silent Bash turns" incident).
 const ANTIGRAVITY_TRANSCRIPT_RULES = [
   "rules:",
-  "- 历史中的 [tool call: ...] 是你上一轮已经执行过的动作，[tool result ...] 是它的输出；不要重复执行已经跑过的相同命令。",
-  "- 拿到最近的 [tool result] 后，如果信息已经足以回答用户，必须直接输出最终结论，禁止再发起任何工具调用。",
+  "- 历史记录里你已经执行过的命令及其输出仅供参考：不要重复执行相同或相似的命令。",
+  "- 拿到最近的命令输出后，如果信息已经足以回答用户，必须直接输出最终结论，禁止再发起任何工具调用。",
+  "- 需要执行命令时，必须通过原生工具调用发起；绝对不要在回复文本里书写工具调用或命令的执行请求。",
   "- 每次发起工具调用前，先用一句话向用户说明你要做什么、为什么。",
   "- 最终结论必须直接回应最初的用户问题，使用用户的语言，而不是复述调查过程。",
 ].join("\n");
@@ -991,9 +992,14 @@ export function antigravityPromptInvocation(prompt, {
   }
   return {
     args: ["--input-format", "stream-json"],
+    // agy's stream decoder expects `message.content` as a PLAIN STRING.
+    // A content-parts array (as used by the native protocol) decodes to an
+    // empty prompt and the CLI then waits forever for a usable user turn —
+    // the hung `agy --input-format stream-json` processes observed in the
+    // wild. Verified against agy 1.2.3 on 2026-09-15.
     stdin: `${JSON.stringify({
       event: "user",
-      message: { role: "user", content: [{ type: "text", text }] },
+      message: { role: "user", content: text },
     })}\n`,
   };
 }

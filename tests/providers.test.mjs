@@ -1318,7 +1318,9 @@ test("Antigravity measures the prompt budget in bytes, not characters", () => {
   const payload = JSON.parse(invocation.stdin);
   assert.equal(payload.event, "user");
   assert.equal(payload.message.role, "user");
-  assert.equal(payload.message.content[0].text, cjk);
+  // agy's stream decoder requires message.content as a plain string; a
+  // content-parts array decodes to an empty prompt and the CLI hangs forever.
+  assert.equal(payload.message.content, cjk);
 });
 
 test("Antigravity moves an oversized prompt off argv onto stdin", () => {
@@ -1331,8 +1333,8 @@ test("Antigravity moves an oversized prompt off argv onto stdin", () => {
   assert.ok(invocation.stdin.endsWith("\n"));
   const payload = JSON.parse(invocation.stdin);
   assert.equal(payload.event, "user");
-  assert.equal(payload.message.content[0].type, "text");
-  assert.equal(payload.message.content[0].text, prompt);
+  assert.equal(typeof payload.message.content, "string");
+  assert.equal(payload.message.content, prompt);
 });
 
 test("Antigravity executor hands an oversized prompt to the CLI runner as stdin", async () => {
@@ -1359,7 +1361,8 @@ test("Antigravity executor hands an oversized prompt to the CLI runner as stdin"
   assert.equal(command.args.includes("-p"), false);
   assert.ok(command.args.every((arg) => arg.length < 64));
   const payload = JSON.parse(command.options.stdin);
-  assert.match(payload.message.content[0].text, /^system:\ns{300000}/);
+  assert.match(payload.message.content, /^system:\ns{300000}/);
+  assert.equal(typeof payload.message.content, "string");
 });
 
 test("Antigravity executor delivered a >ARG_MAX prompt through real CLI stdin", {
@@ -1403,7 +1406,8 @@ test("Antigravity executor delivered a >ARG_MAX prompt through real CLI stdin", 
     const raw = await readFile(capturePath, "utf8");
     const delivered = JSON.parse(raw);
     assert.equal(delivered.event, "user");
-    assert.equal(delivered.message.content[0].text, prompt);
+    assert.equal(typeof delivered.message.content, "string");
+    assert.equal(delivered.message.content, prompt);
 
     const text = chunks.find((chunk) => chunk.type === "text-delta")?.text ?? "";
     assert.equal(text, `received ${Buffer.byteLength(raw, "utf8")} bytes`);
@@ -1812,7 +1816,8 @@ test("Antigravity prompt carries convergence rules for the stateless CLI turn", 
     system: "Be concise.",
     messages: [{ role: "user", content: [{ type: "text", text: "run pwd" }] }],
   });
-  assert.match(prompt, /不要重复执行已经跑过的相同命令/);
+  assert.match(prompt, /不要重复执行相同或相似的命令/);
+  assert.match(prompt, /绝对不要在回复文本里书写工具调用/);
   assert.match(prompt, /必须直接输出最终结论，禁止再发起任何工具调用/);
   assert.match(prompt, /先用一句话向用户说明你要做什么/);
   // The rules must not disturb the caller's system section.
