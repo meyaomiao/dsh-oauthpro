@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -935,6 +935,9 @@ function messagesWithinContext(request) {
   return [...systemMessages, ...selected];
 }
 
+// DEGRADATION PATH ONLY (see the note below): these rules shape the flattened
+// prompt used by the replay fallback.
+//
 // The CLI is spawned statelessly once per turn with the whole transcript
 // flattened into a single prompt. Without these rules the model treats its own
 // past "[tool call]" lines as reference material instead of completed work:
@@ -958,6 +961,7 @@ const ANTIGRAVITY_TRANSCRIPT_RULES = [
 // the system section and the newest turns always survive.
 export const AGY_PROMPT_HISTORY_BYTE_CAP = 60_000;
 
+/** Flatten the whole transcript for the degradation path (never the anchor). */
 export function antigravityRequestPrompt(request = {}) {
   const header = [];
   if (typeof request.system === "string" && request.system.length > 0) {
@@ -982,6 +986,78 @@ export function antigravityRequestPrompt(request = {}) {
     sections = [...header, ...messageSections.slice(drop)];
   }
   return sections.join("\n\n") || "Continue the conversation.";
+}
+
+/**
+ * Permission mirroring (design §4.2).
+ *
+ * agy print mode cannot ask for permission, so any tool call outside its
+ * `permissions.allow` list is auto-denied, the run ends with an empty response,
+ * and the anchored turn degrades to the slow replay path. DSH's own bash tool
+ * runs with the session's file policy (danger-full-access here), so mirroring
+ * means keeping agy's allow list at least as permissive as the DSH side. The
+ * merge is append-only: user rules are never removed, and the first write keeps
+ * a `.bak` copy next to the file.
+ */
+export const ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
+  "read_file(/)",
+  "command(*)",
+  "unsandboxed(*)",
+]);
+
+export function antigravitySettingsFile(env = process.env, home = homedir()) {
+  return env?.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE
+    || join(home, ".gemini", "antigravity-cli", "settings.json");
+}
+
+// One merge per settings file per process: the check is cheap, but there is no
+// reason to stat/read the file on every turn.
+const mirroredPermissionFiles = new Set();
+
+export function ensureAntigravityPermissionMirror({ file, fsModule = null, enabled = true } = {}) {
+  if (!enabled || !file || mirroredPermissionFiles.has(file)) return null;
+  mirroredPermissionFiles.add(file);
+  return mirrorAntigravityPermissions({ file, fsModule });
+}
+
+export function mirrorAntigravityPermissions({
+  file,
+  rules = ANTIGRAVITY_DEFAULT_ALLOW_RULES,
+  fsModule = null,
+} = {}) {
+  const syncFs = fsModule ?? { readFileSync, writeFileSync, mkdirSync, renameSync, copyFileSync, existsSync };
+  const extra = String(process.env.DOCKYARD_ANTIGRAVITY_EXTRA_ALLOW ?? "")
+    .split(",")
+    .map((rule) => rule.trim())
+    .filter(Boolean);
+  const wanted = [...rules, ...extra];
+  let settings = {};
+  let existed = false;
+  try {
+    const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+    settings = parsed && typeof parsed === "object" ? parsed : {};
+    existed = true;
+  } catch {
+    settings = {};
+  }
+  const permissions = settings.permissions && typeof settings.permissions === "object" ? settings.permissions : {};
+  const allow = Array.isArray(permissions.allow) ? permissions.allow.slice() : [];
+  const missing = wanted.filter((rule) => !allow.includes(rule));
+  if (missing.length === 0) return { changed: false, added: [], allow };
+  allow.push(...missing);
+  settings.permissions = { ...permissions, allow };
+  try {
+    syncFs.mkdirSync(dirname(file), { recursive: true });
+    if (existed && !syncFs.existsSync(`${file}.bak`)) {
+      try { syncFs.copyFileSync(file, `${file}.bak`); } catch { /* best effort */ }
+    }
+    const tmp = `${file}.${randomUUID()}.tmp`;
+    syncFs.writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
+    syncFs.renameSync(tmp, file);
+  } catch {
+    // Mirroring is best-effort: a failure only means agy keeps its old rules.
+  }
+  return { changed: true, added: missing, allow };
 }
 
 /**
@@ -1120,6 +1196,13 @@ export function antigravityAnchorInvocation({ conversationId = null, text }) {
 }
 
 /**
+ * DEGRADATION PATH ONLY (design §9.2/P3).
+ *
+ * Everything from here to `antigravityAnchorInvocation` serves the legacy
+ * flattened-replay executor, which the session-anchor path falls back to when
+ * the anchored turn fails twice or no session id is available. Keep it working,
+ * but no new feature should depend on it.
+ *
  * Prompt budget that still travels as `argv`.
  *
  * `execve` caps argv+env at `kern.argmax` (1 MiB on macOS) and, on Linux, caps
@@ -1622,6 +1705,8 @@ export function createAntigravityCliExecutor({
   promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
   conversationStore = null,
   anchorLogPath = null,
+  settingsFile = null,
+  mirrorPermissions = env?.DOCKYARD_ANTIGRAVITY_MIRROR_PERMISSIONS !== "0",
   // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
   // to the legacy replay path on any anchored failure, so default-on is safe.
   sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0",
@@ -1644,6 +1729,13 @@ export function createAntigravityCliExecutor({
       .then(() => detectFakeIp())
       .then((value) => value === true)
       .catch(() => false);
+    // Keep agy's allow list at least as permissive as the DSH side before any
+    // spawn: a denied tool call ends the run with an empty response and forces
+    // the slow replay path.
+    ensureAntigravityPermissionMirror({
+      file: settingsFile ?? antigravitySettingsFile(env),
+      enabled: mirrorPermissions,
+    });
     const sideband = isAntigravitySidebandRequest(request);
     const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
     const legacyStream = async function* () {

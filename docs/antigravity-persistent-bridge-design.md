@@ -274,3 +274,27 @@ P0 必须产出结论的清单从 3 项扩为 **6 项**：Q1（工具回传事�
 - 记录 `sideband_bypass` 诊断行（sessionKey + purpose）
 
 已验证：sessionId 相同 + purpose=session-title 时不会创建映射，且 argv 中无 `--conversation`。
+
+### 9.4 权限镜像自动化（2026-09-15）
+
+**问题**：agy print 模式无法弹权限确认，任何不在 `permissions.allow` 里的工具调用会被自动拒绝 →
+空响应 → 锚定轮降级到慢速重放。此前靠人工往 `~/.gemini/antigravity-cli/settings.json` 加规则，
+遇到新命令类型就会静默降级一次（实测：`git` 未放行时整个工具轮降级）。
+
+**探测**：agy 接受通配规则 `command(*)`（实测放行名单外的 `whoami` 沙箱执行成功）。
+
+**实现**：`ensureAntigravityPermissionMirror()` 在每次 spawn 前做一次幂等合并（每进程每文件只跑一次）：
+- 基线规则 `read_file(/)`、`command(*)`、`unsandboxed(*)`，可用 `DOCKYARD_ANTIGRAVITY_EXTRA_ALLOW` 追加
+- **只追加不删除**：用户自己的规则原样保留
+- 首次写入旁边留 `.bak` 备份
+- `DOCKYARD_ANTIGRAVITY_MIRROR_PERMISSIONS=0` 可整体关闭
+- 自定义路径 `DOCKYARD_ANTIGRAVITY_SETTINGS_FILE`
+
+**安全边界**：镜像等于把 agy 放到与 DSH bash 工具同等权限（本机为 danger-full-access）。
+若想收紧，关闭镜像并自行维护 allow 列表。
+
+### 9.5 P3 清理（2026-09-15）
+
+打平 prompt、60KiB 历史截断、工具意图翻转这一整套**明确标注为降级路径**
+（仅在锚定失败两次或请求没有 sessionId 时使用），并在源码注释中固化该定位，
+避免后续功能再依赖它。

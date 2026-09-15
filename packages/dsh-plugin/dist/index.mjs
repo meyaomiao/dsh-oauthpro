@@ -170,7 +170,7 @@ var init_dockyard_remote_host = __esm({
 });
 
 // packages/dsh-plugin/src/index.mjs
-import { existsSync, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync2, readFileSync as readFileSync3 } from "node:fs";
 import { join as join13 } from "node:path";
 
 // packages/core/src/errors.mjs
@@ -3670,7 +3670,7 @@ function createCodexModule({ driver = {} } = {}) {
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID4 } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
@@ -6054,6 +6054,58 @@ ${text4}`);
   }
   return sections.join("\n\n") || "Continue the conversation.";
 }
+var ANTIGRAVITY_DEFAULT_ALLOW_RULES = Object.freeze([
+  "read_file(/)",
+  "command(*)",
+  "unsandboxed(*)"
+]);
+function antigravitySettingsFile(env = process.env, home = homedir4()) {
+  return env?.DOCKYARD_ANTIGRAVITY_SETTINGS_FILE || join6(home, ".gemini", "antigravity-cli", "settings.json");
+}
+var mirroredPermissionFiles = /* @__PURE__ */ new Set();
+function ensureAntigravityPermissionMirror({ file, fsModule = null, enabled = true } = {}) {
+  if (!enabled || !file || mirroredPermissionFiles.has(file)) return null;
+  mirroredPermissionFiles.add(file);
+  return mirrorAntigravityPermissions({ file, fsModule });
+}
+function mirrorAntigravityPermissions({
+  file,
+  rules = ANTIGRAVITY_DEFAULT_ALLOW_RULES,
+  fsModule = null
+} = {}) {
+  const syncFs = fsModule ?? { readFileSync: readFileSync2, writeFileSync: writeFileSync2, mkdirSync: mkdirSync2, renameSync, copyFileSync, existsSync };
+  const extra = String(process.env.DOCKYARD_ANTIGRAVITY_EXTRA_ALLOW ?? "").split(",").map((rule) => rule.trim()).filter(Boolean);
+  const wanted = [...rules, ...extra];
+  let settings = {};
+  let existed = false;
+  try {
+    const parsed = JSON.parse(syncFs.readFileSync(file, "utf8"));
+    settings = parsed && typeof parsed === "object" ? parsed : {};
+    existed = true;
+  } catch {
+    settings = {};
+  }
+  const permissions = settings.permissions && typeof settings.permissions === "object" ? settings.permissions : {};
+  const allow = Array.isArray(permissions.allow) ? permissions.allow.slice() : [];
+  const missing = wanted.filter((rule) => !allow.includes(rule));
+  if (missing.length === 0) return { changed: false, added: [], allow };
+  allow.push(...missing);
+  settings.permissions = { ...permissions, allow };
+  try {
+    syncFs.mkdirSync(dirname3(file), { recursive: true });
+    if (existed && !syncFs.existsSync(`${file}.bak`)) {
+      try {
+        syncFs.copyFileSync(file, `${file}.bak`);
+      } catch {
+      }
+    }
+    const tmp = `${file}.${randomUUID4()}.tmp`;
+    syncFs.writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
+    syncFs.renameSync(tmp, file);
+  } catch {
+  }
+  return { changed: true, added: missing, allow };
+}
 var ANTIGRAVITY_TITLE_SYSTEM_MARKER = /^Create a concise title for an AI coding-assistant session/m;
 function isAntigravitySidebandRequest(request = {}) {
   const purpose = typeof request?.purpose === "string" ? request.purpose.trim().toLowerCase() : "";
@@ -6507,6 +6559,8 @@ function createAntigravityCliExecutor({
   promptStdinThresholdBytes = AGY_PROMPT_STDIN_THRESHOLD_BYTES,
   conversationStore = null,
   anchorLogPath = null,
+  settingsFile = null,
+  mirrorPermissions = env?.DOCKYARD_ANTIGRAVITY_MIRROR_PERMISSIONS !== "0",
   // Session-anchor mode (docs §8): off only via explicit opt-out; it degrades
   // to the legacy replay path on any anchored failure, so default-on is safe.
   sessionAnchor = process.env.DOCKYARD_ANTIGRAVITY_SESSION_ANCHOR !== "0"
@@ -6524,6 +6578,10 @@ function createAntigravityCliExecutor({
       reasoningEffort: request.reasoningEffort
     });
     const preferLocalUrlFetch = await Promise.resolve().then(() => detectFakeIp()).then((value) => value === true).catch(() => false);
+    ensureAntigravityPermissionMirror({
+      file: settingsFile ?? antigravitySettingsFile(env),
+      enabled: mirrorPermissions
+    });
     const sideband = isAntigravitySidebandRequest(request);
     const effectiveTimeoutMs = sideband ? sidebandTimeoutMs : timeoutMs;
     const legacyStream = async function* () {
@@ -15031,7 +15089,7 @@ function apply(ctx, config = {}) {
                   return;
                 }
                 const filePath = join13(process.cwd(), "artifacts", cleanPath);
-                if (!existsSync(filePath)) {
+                if (!existsSync2(filePath)) {
                   res.writeHead(404);
                   res.end("Not Found");
                   return;

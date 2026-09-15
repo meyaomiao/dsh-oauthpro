@@ -3693,3 +3693,47 @@ test("Antigravity never anchors a sideband request into the user conversation", 
   // No mapping may be created for the session by a sideband run.
   await assert.rejects(readFile(storeFile, "utf8"));
 });
+
+test("Antigravity mirrors permission rules into agy settings before spawning", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-perm-"));
+  const settingsFile = join(dir, "settings.json");
+  await writeFile(settingsFile, JSON.stringify({ permissions: { allow: ["command(ls)", "custom(rule)"] } }), "utf8");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile,
+  });
+  const stream = await executor({
+    request: { sessionId: "dsh-session-perm", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+  });
+  for await (const _c of stream) { /* drain */ }
+  const merged = JSON.parse(await readFile(settingsFile, "utf8"));
+  // User rules survive; the DSH-side baseline is appended.
+  assert.ok(merged.permissions.allow.includes("custom(rule)"));
+  assert.ok(merged.permissions.allow.includes("command(*)"));
+  assert.ok(merged.permissions.allow.includes("unsandboxed(*)"));
+  // A backup of the pre-merge file is kept next to it.
+  assert.ok((await readFile(`${settingsFile}.bak`, "utf8")).includes("custom(rule)"));
+});
+
+test("Antigravity permission mirroring can be disabled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-perm-off-"));
+  const settingsFile = join(dir, "settings.json");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "ok", usage: { input_tokens: 1, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile,
+    mirrorPermissions: false,
+  });
+  const stream = await executor({ request: { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] } });
+  for await (const _c of stream) { /* drain */ }
+  await assert.rejects(readFile(settingsFile, "utf8"));
+});
