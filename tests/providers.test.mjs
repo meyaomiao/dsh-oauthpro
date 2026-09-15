@@ -26,6 +26,7 @@ import {
   createAntigravityCatalogLoader,
   createAntigravityConversationStore,
   antigravityHistoryImport,
+  antigravityRepeatRatio,
   isAntigravitySidebandRequest,
   createAntigravityCliExecutor,
   createAntigravityDriver,
@@ -3837,4 +3838,55 @@ test("Antigravity labels the tail when the user switched away and back", async (
   assert.ok(!sent[1].includes("agy 自己的回答"), "agy's own reply must not be echoed back");
   assert.match(sent[1], /assistant:\n别的模型的回答/);
   assert.match(sent[1], /user:\n接着问/);
+});
+
+test("Antigravity drops a re-rendered duplicate from the final response", async () => {
+  // Observed in the wild: the CLI streamed the answer once, then its final
+  // `result.response` carried the same answer a second time re-rendered (the
+  // two copies differed only in ASCII box widths), and the append-only merge
+  // printed the whole reply twice.
+  const once = [
+    "已收到你的明确反馈！针对这 4 点整理如下：",
+    "",
+    "┌──────────────────────────────┐",
+    "│ [≡] ✦ 米云创作 | 图像 | 视频 │",
+    "└──────────────────────────────┘",
+    "",
+    "### 一、布局定稿\n" + "左栏 360px，输入框自顶向下撑开。".repeat(6),
+    "### 二、主题方案\n" + "深浅色 token 与圆角规范。".repeat(6),
+  ].join("\n");
+  const reRendered = once.replace(/─{10,}/g, "─".repeat(46)).replace("已收到", "已收到");
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "ACTIVE", step_type: "agent_response", text_delta: once },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: { state: "DONE", step_type: "agent_response", usage: { input_tokens: 10, output_tokens: 5 } },
+      });
+      // Final response repeats the same answer, reflowed.
+      yield JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: `${once}\n${reRendered}`, usage: { input_tokens: 10, output_tokens: 5 } },
+      });
+    },
+  });
+  const stream = await executor({
+    request: { messages: [{ role: "user", content: [{ type: "text", text: "定稿方案" }] }] },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const text = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.equal(text.split("已收到你的明确反馈").length - 1, 1, "answer must appear exactly once");
+  assert.ok(text.includes("布局定稿"));
+});
+
+test("Antigravity repeat ratio ignores whitespace reflows but keeps new text", () => {
+  const a = "左栏 360px，输入框自顶向下撑开。".repeat(20);
+  const reflowed = a.replace(/，/g, "， ").replace(/。/g, "。 ");
+  assert.ok(antigravityRepeatRatio(a, reflowed) >= 0.8);
+  assert.ok(antigravityRepeatRatio(a, "完全不同的新内容。".repeat(40)) < 0.2);
 });

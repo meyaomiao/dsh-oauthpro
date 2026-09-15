@@ -6559,6 +6559,26 @@ function appendDelta(current, next) {
   if (current.endsWith(next)) return "";
   return next;
 }
+function shingles(text4, size = 6) {
+  const normalized = String(text4 ?? "").replace(/\s+/g, "");
+  const set = /* @__PURE__ */ new Set();
+  for (let i = 0; i + size <= normalized.length; i += 1) set.add(normalized.slice(i, i + size));
+  return set;
+}
+function antigravityRepeatRatio(emitted, candidate2) {
+  if (!candidate2) return 0;
+  const candidateShingles = shingles(candidate2);
+  if (candidateShingles.size === 0) return 0;
+  const emittedShingles = shingles(emitted);
+  if (emittedShingles.size === 0) return 0;
+  let shared = 0;
+  for (const shingle of candidateShingles) {
+    if (emittedShingles.has(shingle)) shared += 1;
+  }
+  return shared / candidateShingles.size;
+}
+var AGY_REPEAT_MIN_CHARS = 200;
+var AGY_REPEAT_RATIO = 0.8;
 function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
@@ -6687,7 +6707,10 @@ function createAntigravityCliExecutor({
             error.detail = final.error ?? final.text ?? null;
             throw error;
           }
-          const next = appendDelta(text4, final.text);
+          let next = appendDelta(text4, final.text);
+          if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
           if (next) {
             text4 += next;
             yield { type: "text-delta", index: 0, text: next };
@@ -6798,7 +6821,10 @@ ${request.system}
             appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length });
             throw error;
           }
-          const next = appendDelta(text4, final.text);
+          let next = appendDelta(text4, final.text);
+          if (next && next.length >= AGY_REPEAT_MIN_CHARS && antigravityRepeatRatio(text4, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
           if (next) {
             text4 += next;
             yield { type: "text-delta", index: 0, text: next };

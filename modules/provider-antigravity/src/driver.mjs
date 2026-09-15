@@ -1722,6 +1722,41 @@ function appendDelta(current, next) {
   return next;
 }
 
+/** Character shingles, whitespace-insensitive: box reflows must not defeat dedup. */
+function shingles(text, size = 6) {
+  const normalized = String(text ?? "").replace(/\s+/g, "");
+  const set = new Set();
+  for (let i = 0; i + size <= normalized.length; i += 1) set.add(normalized.slice(i, i + size));
+  return set;
+}
+
+/**
+ * How much of `candidate` is already covered by `emitted` (0..1).
+ *
+ * agy's final `result.response` can contain the whole answer a second time —
+ * re-rendered, so it is not a clean prefix extension (observed: 3469 + 3605
+ * chars whose two copies differ only in ASCII box widths, which our append-only
+ * delta handler dutifully appended as if it were new content). Containment on
+ * whitespace-insensitive shingles catches that reflow without suppressing
+ * genuinely new text.
+ */
+export function antigravityRepeatRatio(emitted, candidate) {
+  if (!candidate) return 0;
+  const candidateShingles = shingles(candidate);
+  if (candidateShingles.size === 0) return 0;
+  const emittedShingles = shingles(emitted);
+  if (emittedShingles.size === 0) return 0;
+  let shared = 0;
+  for (const shingle of candidateShingles) {
+    if (emittedShingles.has(shingle)) shared += 1;
+  }
+  return shared / candidateShingles.size;
+}
+
+/** Minimum length before repeat suppression may apply, so short prose is safe. */
+export const AGY_REPEAT_MIN_CHARS = 200;
+export const AGY_REPEAT_RATIO = 0.8;
+
 /** Execute text turns through the installed official Antigravity CLI. */
 export function createAntigravityCliExecutor({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
@@ -1880,7 +1915,15 @@ export function createAntigravityCliExecutor({
             error.detail = final.error ?? final.text ?? null;
             throw error;
           }
-          const next = appendDelta(text, final.text);
+          let next = appendDelta(text, final.text);
+          // The CLI re-renders the answer into its final response often enough
+          // that appending the "remainder" duplicates the whole reply. Drop it
+          // when it is already covered by what we streamed.
+          if (next
+            && next.length >= AGY_REPEAT_MIN_CHARS
+            && antigravityRepeatRatio(text, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
           if (next) {
             text += next;
             yield { type: "text-delta", index: 0, text: next };
@@ -2020,7 +2063,15 @@ export function createAntigravityCliExecutor({
             appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text.length });
             throw error;
           }
-          const next = appendDelta(text, final.text);
+          let next = appendDelta(text, final.text);
+          // The CLI re-renders the answer into its final response often enough
+          // that appending the "remainder" duplicates the whole reply. Drop it
+          // when it is already covered by what we streamed.
+          if (next
+            && next.length >= AGY_REPEAT_MIN_CHARS
+            && antigravityRepeatRatio(text, next) >= AGY_REPEAT_RATIO) {
+            next = "";
+          }
           if (next) {
             text += next;
             yield { type: "text-delta", index: 0, text: next };

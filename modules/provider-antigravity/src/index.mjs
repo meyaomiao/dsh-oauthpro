@@ -27,6 +27,7 @@ export {
   antigravityHistoryImport,
   antigravityMessagesFingerprint,
   antigravityPromptInvocation,
+  antigravityRepeatRatio,
   isAntigravitySidebandRequest,
   antigravityRequestPrompt,
   createAntigravityConversationStore,
