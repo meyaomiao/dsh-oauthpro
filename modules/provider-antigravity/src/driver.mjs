@@ -1164,6 +1164,37 @@ export function antigravityMessagesFingerprint(messages) {
 }
 
 /**
+ * Render the pre-existing conversation for the FIRST anchored turn.
+ *
+ * agy has no memory of this session yet, so the whole transcript must travel
+ * once. Unlike the continuation tail it MUST keep role labels: without them the
+ * import is an unlabelled wall of prose in which the model cannot tell its own
+ * previous answers from the user's questions — the "switched to Antigravity and
+ * it ignored the earlier history" report.
+ *
+ * The newest turns always survive; older ones are dropped until the import fits
+ * the same byte budget the replay path uses, so a long foreign-model session
+ * cannot blow the latency budget on the very first Antigravity message.
+ */
+export function antigravityHistoryImport(messages, { capBytes = AGY_PROMPT_HISTORY_BYTE_CAP } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const sections = [];
+  for (const message of list) {
+    const text = contentText(message?.content ?? message?.text);
+    if (!text) continue;
+    const role = String(message?.role ?? "message").toLowerCase();
+    sections.push(`${role}:\n${text}`);
+  }
+  let kept = sections;
+  let drop = 0;
+  while (kept.length > 0 && Buffer.byteLength(kept.join("\n\n"), "utf8") > capBytes && drop < sections.length) {
+    drop += 1;
+    kept = sections.slice(drop);
+  }
+  return kept.join("\n\n");
+}
+
+/**
  * Flatten the messages newer than the anchored prefix into one user text.
  * Leading assistant messages are skipped: they are agy's own replies, which
  * its conversation memory already holds — replaying them would duplicate the
@@ -1171,13 +1202,21 @@ export function antigravityMessagesFingerprint(messages) {
  */
 function antigravityTailText(messages, fromLen) {
   const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
-  while (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+  // Exactly ONE leading assistant message is agy's own reply to the last
+  // anchored turn; everything after it is new to agy. A loop here would also
+  // swallow foreign-model answers that follow a model switch.
+  if (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
     list.shift();
   }
+  // A tail that carries foreign-model turns (the user switched away and back)
+  // needs the same role labels as a full import, or the model cannot tell those
+  // answers from the user's own words. A pure new-user tail stays raw.
+  const labelled = list.some((message) => String(message?.role ?? "").toLowerCase() === "assistant");
   const parts = [];
   for (const message of list) {
     const text = contentText(message?.content ?? message?.text);
-    if (text) parts.push(text);
+    if (!text) continue;
+    parts.push(labelled ? `${String(message?.role ?? "message").toLowerCase()}:\n${text}` : text);
   }
   return parts.join("\n\n");
 }
@@ -1903,9 +1942,13 @@ export function createAntigravityCliExecutor({
       && record.msgsLen <= messages.length
       && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash,
     );
-    // The tail since the anchored prefix is the only new content; replaying
-    // older messages would duplicate them inside the agy conversation.
-    const tail = antigravityTailText(messages, continuation ? record.msgsLen : 0);
+    // On the first anchored turn the whole prior conversation (possibly written
+    // by another model) must be imported once, with role labels so the model can
+    // tell answers from questions. Later turns only need the new content, since
+    // agy already holds everything before the anchored prefix.
+    const tail = continuation
+      ? antigravityTailText(messages, record.msgsLen)
+      : `以下是本会话此前的对话历史（由其它模型产生），请把它当作你自己的上下文继续：\n\n${antigravityHistoryImport(messages)}`;
     const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0
       ? `会话约定（长期有效）：\n${request.system}\n\n`
       : "";

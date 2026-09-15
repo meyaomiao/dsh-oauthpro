@@ -24,6 +24,7 @@ export {
   AntigravityOfficialSessionDriver,
   antigravityAnchorInvocation,
   antigravityConversationsFile,
+  antigravityHistoryImport,
   antigravityMessagesFingerprint,
   antigravityPromptInvocation,
   isAntigravitySidebandRequest,

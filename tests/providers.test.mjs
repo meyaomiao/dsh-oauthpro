@@ -25,6 +25,7 @@ import {
 import {
   createAntigravityCatalogLoader,
   createAntigravityConversationStore,
+  antigravityHistoryImport,
   isAntigravitySidebandRequest,
   createAntigravityCliExecutor,
   createAntigravityDriver,
@@ -3744,4 +3745,96 @@ test("Antigravity permission mirroring can be disabled", async () => {
   const stream = await executor({ request: { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] } });
   for await (const _c of stream) { /* drain */ }
   await assert.rejects(readFile(settingsFile, "utf8"));
+});
+
+test("Antigravity labels imported history so a model switch keeps context", () => {
+  // Regression: the first anchored turn flattened the foreign-model history into
+  // unlabelled prose, so the model could not tell its own answers from the
+  // user's questions and appeared to ignore the earlier conversation.
+  const rendered = antigravityHistoryImport([
+    { role: "user", content: [{ type: "text", text: "帮我看看登录流程" }] },
+    { role: "assistant", content: [{ type: "text", text: "先查 auth 模块" }] },
+    { role: "user", content: [{ type: "text", text: "那就继续" }] },
+  ]);
+  assert.match(rendered, /user:\n帮我看看登录流程/);
+  assert.match(rendered, /assistant:\n先查 auth 模块/);
+  assert.match(rendered, /user:\n那就继续/);
+});
+
+test("Antigravity caps the imported history and keeps the newest turns", () => {
+  const rendered = antigravityHistoryImport([
+    { role: "user", content: [{ type: "text", text: "OLD ".repeat(20_000) }] },
+    { role: "assistant", content: [{ type: "text", text: "OLD ANSWER ".repeat(20_000) }] },
+    { role: "user", content: [{ type: "text", text: "最新的问题" }] },
+  ]);
+  assert.ok(Buffer.byteLength(rendered, "utf8") <= 60_000, `import too large: ${Buffer.byteLength(rendered, "utf8")}`);
+  assert.match(rendered, /最新的问题/);
+  assert.ok(!rendered.includes("OLD ".repeat(100)), "oldest turns must be trimmed");
+});
+
+test("Antigravity sends a labelled import on the first anchored turn of an existing session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agy-import-"));
+  const storeFile = join(dir, "convs.json");
+  let sent = null;
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      sent = JSON.parse(opts.stdin.trim()).message.content;
+      yield JSON.stringify({ event: "init", conversation_id: "cid-import" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-import", status: "SUCCESS", response: "ok", usage: { input_tokens: 3, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: storeFile }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile: join(dir, "settings.json"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-import",
+      system: "Be concise.",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "历史问题" }] },
+        { role: "assistant", content: [{ type: "text", text: "历史回答" }] },
+        { role: "user", content: [{ type: "text", text: "新问题" }] },
+      ],
+    },
+  });
+  for await (const _c of stream) { /* drain */ }
+  assert.match(sent, /此前的对话历史/);
+  assert.match(sent, /user:\n历史问题/);
+  assert.match(sent, /assistant:\n历史回答/);
+  assert.match(sent, /user:\n新问题/);
+});
+
+test("Antigravity labels the tail when the user switched away and back", async () => {
+  // Scenario: the session already has an agy conversation, the user chats with
+  // another model for a turn, then returns. Those foreign turns sit in the tail
+  // and must be labelled, otherwise they read as one undifferentiated block.
+  const dir = await mkdtemp(join(tmpdir(), "agy-tail-label-"));
+  const sent = [];
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* (path, args, opts) {
+      sent.push(JSON.parse(opts.stdin.trim()).message.content);
+      yield JSON.stringify({ event: "init", conversation_id: "cid-tail" });
+      yield JSON.stringify({ event: "result", result: { conversation_id: "cid-tail", status: "SUCCESS", response: "ok", usage: { input_tokens: 3, output_tokens: 1 } } });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile: join(dir, "settings.json"),
+  });
+  const base = { sessionId: "dsh-session-tail" };
+  const first = [{ role: "user", content: [{ type: "text", text: "第一问" }] }];
+  for await (const _c of await executor({ request: { ...base, messages: first } })) { /* drain */ }
+  // Turn two: agy's own reply to turn one, then a foreign-model answer and a
+  // new question. Only agy's reply may be dropped; the foreign one must stay.
+  for await (const _c of await executor({ request: { ...base, messages: [
+    ...first,
+    { role: "assistant", content: [{ type: "text", text: "agy 自己的回答" }] },
+    { role: "user", content: [{ type: "text", text: "切到别的模型问" }] },
+    { role: "assistant", content: [{ type: "text", text: "别的模型的回答" }] },
+    { role: "user", content: [{ type: "text", text: "接着问" }] },
+  ] } })) { /* drain */ }
+  assert.ok(!sent[1].includes("agy 自己的回答"), "agy's own reply must not be echoed back");
+  assert.match(sent[1], /assistant:\n别的模型的回答/);
+  assert.match(sent[1], /user:\n接着问/);
 });

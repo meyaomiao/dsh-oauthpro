@@ -6173,15 +6173,36 @@ function antigravityMessagesFingerprint(messages) {
     msgsHash: createHash5("sha256").update(JSON.stringify(list)).digest("hex").slice(0, 32)
   };
 }
+function antigravityHistoryImport(messages, { capBytes = AGY_PROMPT_HISTORY_BYTE_CAP } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const sections = [];
+  for (const message of list) {
+    const text4 = contentText(message?.content ?? message?.text);
+    if (!text4) continue;
+    const role = String(message?.role ?? "message").toLowerCase();
+    sections.push(`${role}:
+${text4}`);
+  }
+  let kept = sections;
+  let drop = 0;
+  while (kept.length > 0 && Buffer.byteLength(kept.join("\n\n"), "utf8") > capBytes && drop < sections.length) {
+    drop += 1;
+    kept = sections.slice(drop);
+  }
+  return kept.join("\n\n");
+}
 function antigravityTailText(messages, fromLen) {
   const list = (Array.isArray(messages) ? messages : []).slice(fromLen);
-  while (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
+  if (list.length > 0 && String(list[0]?.role ?? "").toLowerCase() === "assistant") {
     list.shift();
   }
+  const labelled = list.some((message) => String(message?.role ?? "").toLowerCase() === "assistant");
   const parts = [];
   for (const message of list) {
     const text4 = contentText(message?.content ?? message?.text);
-    if (text4) parts.push(text4);
+    if (!text4) continue;
+    parts.push(labelled ? `${String(message?.role ?? "message").toLowerCase()}:
+${text4}` : text4);
   }
   return parts.join("\n\n");
 }
@@ -6710,7 +6731,9 @@ function createAntigravityCliExecutor({
     const continuation = Boolean(
       record && Number.isInteger(record.msgsLen) && record.msgsLen <= messages.length && antigravityMessagesFingerprint(messages.slice(0, record.msgsLen)).msgsHash === record.msgsHash
     );
-    const tail = antigravityTailText(messages, continuation ? record.msgsLen : 0);
+    const tail = continuation ? antigravityTailText(messages, record.msgsLen) : `\u4EE5\u4E0B\u662F\u672C\u4F1A\u8BDD\u6B64\u524D\u7684\u5BF9\u8BDD\u5386\u53F2\uFF08\u7531\u5176\u5B83\u6A21\u578B\u4EA7\u751F\uFF09\uFF0C\u8BF7\u628A\u5B83\u5F53\u4F5C\u4F60\u81EA\u5DF1\u7684\u4E0A\u4E0B\u6587\u7EE7\u7EED\uFF1A
+
+${antigravityHistoryImport(messages)}`;
     const conversationIntro = !continuation && typeof request.system === "string" && request.system.length > 0 ? `\u4F1A\u8BDD\u7EA6\u5B9A\uFF08\u957F\u671F\u6709\u6548\uFF09\uFF1A
 ${request.system}
 
