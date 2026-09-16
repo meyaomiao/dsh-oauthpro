@@ -1438,6 +1438,27 @@ const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
 });
 
 /**
+ * CLI spellings that mean the same tool as a name the translation map already
+ * covers. `read_url` is the one observed in the wild: agy 1.2.3 emits it for a
+ * page read (`user denied permission for read_url "design.momotoken.win"`),
+ * while the map only knew `read_url_content`. An unresolved name costs more
+ * than a missing translation: `toolCallFromEvent` returns null, no tool-call is
+ * emitted, the turn ends with no visible text, and an empty anchored run is
+ * retried twice before degrading to the slow replay path — ~180s spent on a
+ * deterministic permission denial. Aliasing keeps the CLI's vocabulary in one
+ * place without inventing new authority: an alias never resolves unless its
+ * canonical name is already mapped.
+ */
+const ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
+  read_url: "read_url_content",
+});
+
+function antigravityCanonicalToolName(providerToolName) {
+  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
+  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+}
+
+/**
  * Detect a TUN proxy that answers every DNS query with a reserved address
  * (Clash / Surge / TomatoCloud "fake-IP" or enhanced mode).
  *
@@ -1629,7 +1650,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -1666,8 +1687,10 @@ function toolCallFromEvent(payload, request, options = {}) {
     }
   }
   // The CLI reads a URL under `read_url_content` with a capitalized `Url`
-  // parameter; DSH's `web_fetch` takes `url`.
-  if (providerName === "read_url_content" && target.name === "web_fetch") {
+  // parameter, or — same capability, different spelling — under `read_url`
+  // with a lowercase `url`; DSH's `web_fetch` takes `url`. Both spellings are
+  // accepted here so the canonical name alone decides the branch.
+  if (antigravityCanonicalToolName(providerName) === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
