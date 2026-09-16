@@ -1655,6 +1655,134 @@ test("Antigravity does not forward an unmapped CLI tool through a read alias", a
   }, (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT");
 });
 
+test("Antigravity maps the CLI's CamelCase ReadUrlContent spelling into DSH web_fetch", async () => {
+  // The spelling that actually reaches the driver in the wild: the CLI's own
+  // permission log and generic step confirmation say
+  // `soft-denying tool confirmation "ReadUrlContent"` (agy 1.2.3). The
+  // translation table is snake_case, so a case-sensitive lookup returned null,
+  // emitted no tool-call, and left the turn empty — every page read then cost
+  // one empty anchored run plus two retries before degrading.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "ReadUrlContent",
+          tool_info: { name: "ReadUrlContent", parameters: { Url: "https://design.momotoken.win/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "look at my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://design.momotoken.win/" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity normalizes CamelCase CLI names for the other translated tools too", async () => {
+  for (const [cliName, target, parameters, expected] of [
+    ["RunCommand", "bash", { command: "ls -la" }, { command: "ls -la" }],
+    ["SearchWeb", "web_search", { query: "momotoken" }, { queries: ["momotoken"] }],
+  ]) {
+    const executor = createAntigravityCliExecutor({
+      cliPath: "agy-test",
+      detectFakeIp: async () => false,
+      streamCommandRunner: async function* () {
+        yield JSON.stringify({
+          event: "step_update",
+          step_update: {
+            state: "ACTIVE",
+            step_type: "tool",
+            tool_name: cliName,
+            tool_info: { name: cliName, parameters },
+          },
+        });
+        throw new Error("the bridge should stop after forwarding the tool call");
+      },
+    });
+    const stream = await executor({
+      request: {
+        model: "gemini-live-medium",
+        tools: [{ name: target, description: "", parameters: {} }],
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      },
+    });
+    const calls = [];
+    try {
+      for await (const chunk of stream) {
+        if (chunk.block?.type === "tool-call") calls.push(chunk.block);
+      }
+    } catch { /* forwarding throws by design in this harness */ }
+    assert.equal(calls.length, 1, `${cliName} should forward exactly one tool call`);
+    assert.equal(calls[0].name, target);
+    const forwarded = JSON.parse(calls[0].arguments);
+    for (const [key, value] of Object.entries(expected)) assert.deepEqual(forwarded[key], value);
+  }
+});
+
+test("Antigravity still forwards a request-declared tool name unchanged", async () => {
+  // Guard against over-normalizing: the raw name keeps winning the exact match,
+  // so a request that declares a tool in the CLI's casing is untouched.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "bash",
+          tool_info: { name: "bash", parameters: { command: "echo hi" } },
+        },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", text: "done" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    },
+  });
+  const calls = [];
+  try {
+    for await (const chunk of stream) {
+      if (chunk.block?.type === "tool-call") calls.push(chunk.block);
+    }
+  } catch { /* silent-run guard */ }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "bash");
+  assert.deepEqual(JSON.parse(calls[0].arguments).command, "echo hi");
+});
+
 test("Antigravity reads URLs through curl when the proxy answers DNS with fake IPs", async () => {
   // A TUN proxy in fake-IP mode resolves every hostname to 198.18.0.0/15, which
   // DSH's guarded web_fetch rejects before connecting. The connection itself is
