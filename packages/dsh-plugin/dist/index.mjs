@@ -5681,30 +5681,7 @@ function parseAntigravityModelCatalog(output) {
     const [id, ...nameParts] = line.split("	");
     return { id, name: nameParts.join("	") || id };
   }).filter((model) => model.id);
-  const families = /* @__PURE__ */ new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? /* @__PURE__ */ new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id
-      }
-    };
-  });
+  return rows;
 }
 function registryModels(value) {
   if (Array.isArray(value)) return value;
@@ -5772,9 +5749,10 @@ function registryMatch(model, registry) {
   const exact = candidates.find((candidate2) => candidate2.id === model.id);
   if (exact) return exact;
   const family = candidates[0];
-  if (!family || !model.reasoning?.efforts?.length) return null;
+  if (!family) return null;
   const suffix = model.id.slice(family.id.length + 1);
-  return model.reasoning.efforts.some((effort) => normalizeToken(effort.id) === normalizeToken(suffix)) ? family : null;
+  const tier = modelTier(model);
+  return tier && normalizeToken(tier.id) === normalizeToken(suffix) ? family : null;
 }
 function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
@@ -5949,9 +5927,9 @@ function createAntigravityCatalogLoader({
   return loadCatalog;
 }
 function familyPrefixForModel(model) {
-  const defaultEffort = model?.reasoning?.defaultEffort;
-  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
-  const suffix = `-${defaultEffort}`;
+  const tier = modelTier(model);
+  if (!tier || typeof model?.id !== "string") return null;
+  const suffix = `-${tier.id}`;
   return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
 }
 async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
@@ -6355,6 +6333,13 @@ var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   read_url_content: "web_fetch",
   search_web: "web_search"
 });
+var ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
+  read_url: "read_url_content"
+});
+function antigravityCanonicalToolName(providerToolName) {
+  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
+  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+}
 var FAKE_IP_PROBE_HOST = "example.com";
 var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
 var fakeIpCache = /* @__PURE__ */ new Map();
@@ -6489,7 +6474,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -6523,7 +6508,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (providerName2 === "read_url_content" && target.name === "web_fetch") {
+  if (antigravityCanonicalToolName(providerName2) === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {

@@ -496,31 +496,12 @@ export function parseAntigravityModelCatalog(output) {
     })
     .filter((model) => model.id);
 
-  const families = new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id,
-      },
-    };
-  });
+  // Tier rows keep their tier in the id (`gemini-3.8-flash-high`). Declaring
+  // `reasoning.efforts` on them made DSH render a SECOND selector whose choice
+  // is either silently ignored (native transport) or merely remapped back to the
+  // id-encoded tier (CLI transport). Publishing the rows as plain models lets
+  // the menu offer each tier exactly once. Refs #65.
+  return rows;
 }
 
 function registryModels(value) {
@@ -608,16 +589,16 @@ function registryMatch(model, registry) {
   const exact = candidates.find((candidate) => candidate.id === model.id);
   if (exact) return exact;
 
-  // A live provider row may encode a returned reasoning tier in its model id
-  // (for example, a family row ending in the provider-returned effort id).
-  // Only use a registry family match when that suffix is itself present in
-  // the live catalog's effort set; this avoids guessing across unrelated ids.
+  // A live provider row may encode its tier in the model id (for example,
+  // `gemini-3.6-flash-high` for the `gemini-3.6-flash` family). Since #65 the
+  // tier is no longer mirrored into `reasoning.efforts`, so the suffix is
+  // validated against the row's own id/label tier instead — the same strict
+  // check that keeps unrelated ids from being folded into a family.
   const family = candidates[0];
-  if (!family || !model.reasoning?.efforts?.length) return null;
+  if (!family) return null;
   const suffix = model.id.slice(family.id.length + 1);
-  return model.reasoning.efforts.some((effort) => normalizeToken(effort.id) === normalizeToken(suffix))
-    ? family
-    : null;
+  const tier = modelTier(model);
+  return tier && normalizeToken(tier.id) === normalizeToken(suffix) ? family : null;
 }
 
 /**
@@ -818,10 +799,18 @@ export function createAntigravityCatalogLoader({
   return loadCatalog;
 }
 
+/**
+ * Family prefix for a tier-suffixed row, derived from the id itself.
+ *
+ * This used to require `reasoning.defaultEffort`, which #65 removed from tier
+ * rows. The id/name tier check (`modelTier`) is if anything stricter: the row is
+ * only treated as a tier when its parenthesised label equals its id suffix, so
+ * an unrelated id can never be folded into another family.
+ */
 function familyPrefixForModel(model) {
-  const defaultEffort = model?.reasoning?.defaultEffort;
-  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
-  const suffix = `-${defaultEffort}`;
+  const tier = modelTier(model);
+  if (!tier || typeof model?.id !== "string") return null;
+  const suffix = `-${tier.id}`;
   return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
 }
 
@@ -1449,6 +1438,27 @@ const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
 });
 
 /**
+ * CLI spellings that mean the same tool as a name the translation map already
+ * covers. `read_url` is the one observed in the wild: agy 1.2.3 emits it for a
+ * page read (`user denied permission for read_url "design.momotoken.win"`),
+ * while the map only knew `read_url_content`. An unresolved name costs more
+ * than a missing translation: `toolCallFromEvent` returns null, no tool-call is
+ * emitted, the turn ends with no visible text, and an empty anchored run is
+ * retried twice before degrading to the slow replay path — ~180s spent on a
+ * deterministic permission denial. Aliasing keeps the CLI's vocabulary in one
+ * place without inventing new authority: an alias never resolves unless its
+ * canonical name is already mapped.
+ */
+const ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
+  read_url: "read_url_content",
+});
+
+function antigravityCanonicalToolName(providerToolName) {
+  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
+  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+}
+
+/**
  * Detect a TUN proxy that answers every DNS query with a reserved address
  * (Clash / Surge / TomatoCloud "fake-IP" or enhanced mode).
  *
@@ -1640,7 +1650,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -1677,8 +1687,10 @@ function toolCallFromEvent(payload, request, options = {}) {
     }
   }
   // The CLI reads a URL under `read_url_content` with a capitalized `Url`
-  // parameter; DSH's `web_fetch` takes `url`.
-  if (providerName === "read_url_content" && target.name === "web_fetch") {
+  // parameter, or — same capability, different spelling — under `read_url`
+  // with a lowercase `url`; DSH's `web_fetch` takes `url`. Both spellings are
+  // accepted here so the canonical name alone decides the branch.
+  if (antigravityCanonicalToolName(providerName) === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
