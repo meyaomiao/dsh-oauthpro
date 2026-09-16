@@ -1160,6 +1160,58 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
   });
 });
 
+test("Antigravity tier rows declare their own effort when the registry is unavailable", () => {
+  // Account-scoped catalog reads were observed without registry metadata, which
+  // left every row bare. DSH then rejects any stored reasoningEffort outright
+  // (`UNSUPPORTED_REASONING_EFFORT`) even though the effort is exactly the tier
+  // the row already encodes — every antigravity conversation carrying an effort
+  // became unusable. The row therefore declares the single effort it is.
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+    "claude-live\tClaude Live (Thinking)",
+  ].join("\n"));
+  assert.deepEqual(enrichAntigravityModelCatalog(live, []).map((model) => [model.id, model.reasoning]), [
+    ["gemini-3.8-flash-high", { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" }],
+    ["gemini-3.8-flash-low", { efforts: [{ id: "low", name: "Low" }], defaultEffort: "low" }],
+    // No tier in the id, nothing to declare: a row that never had a reasoning
+    // control must not grow one.
+    ["claude-live", undefined],
+  ]);
+});
+
+test("Antigravity keeps the registry's own reasoning tiers when it provides them", () => {
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+  ].join("\n"));
+  const registry = [{
+    id: "gemini-3.8-flash",
+    reasoning: {
+      efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }, { id: "low", name: "Low" }],
+      defaultEffort: "high",
+    },
+  }];
+  assert.deepEqual(enrichAntigravityModelCatalog(live, registry)[0].reasoning, {
+    efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }, { id: "low", name: "Low" }],
+    defaultEffort: "high",
+  });
+});
+
+test("Antigravity never declares an empty reasoning effort list", () => {
+  // DSH rejects `efforts: []` with INVALID_MODEL_REASONING, so the fallback must
+  // either declare a real effort or leave the field out entirely.
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "claude-live\tClaude Live (Thinking)",
+  ].join("\n"));
+  for (const model of enrichAntigravityModelCatalog(live, [])) {
+    if (model.reasoning !== undefined) assert.ok(model.reasoning.efforts.length > 0);
+    if (model.reasoning?.defaultEffort !== undefined) {
+      assert.ok(model.reasoning.efforts.some((effort) => effort.id === model.reasoning.defaultEffort));
+    }
+  }
+});
+
 test("Antigravity capacity metadata is enriched only from a live-compatible registry family", () => {
   const live = parseAntigravityModelCatalog([
     "gemini-3.6-flash-high\tGemini 3.6 Flash (High)",
@@ -1177,6 +1229,7 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
+      reasoning: { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" },
     },
     {
       id: "gemini-3.6-flash-medium",
@@ -1184,6 +1237,7 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
+      reasoning: { efforts: [{ id: "medium", name: "Medium" }], defaultEffort: "medium" },
     },
   ]);
   assert.deepEqual(enrichAntigravityModelCatalog(live, [{ id: "gemini-3.7-flash" }])[0].contextWindow, undefined);

@@ -610,17 +610,39 @@ function registryMatch(model, registry) {
 export function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
     const match = registryMatch(model, registry);
-    if (!match) return model;
-    const contextWindow = finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length);
-    const maxTokens = finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens);
+    const matchedReasoning = match && typeof match.reasoning === "object" && !Array.isArray(match.reasoning)
+      ? match.reasoning
+      : undefined;
+    if (!match && model.reasoning !== undefined) return model;
+    const contextWindow = match
+      ? finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length)
+      : undefined;
+    const maxTokens = match
+      ? finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens)
+      : undefined;
     const inputModalities = Array.isArray(model.inputModalities)
       ? model.inputModalities
-      : Array.isArray(match.input) ? match.input : undefined;
+      : match && Array.isArray(match.input) ? match.input : undefined;
+    // A row whose tier is encoded in its id (and mirrored in its label) always
+    // declares that tier back to DSH. DSH strips the tier from
+    // `reasoning.efforts` on purpose (Refs #65) — but a model with no
+    // `reasoning` at all makes DSH reject any stored effort outright
+    // (`UNSUPPORTED_REASONING_EFFORT`), and DSH's own client persists an
+    // `reasoningEffort` per selection. When the registry happens to be
+    // unavailable this left the account-scoped catalog with bare rows, so every
+    // antigravity conversation carrying an effort became unusable. The fallback
+    // declares the single effort the row actually is, keeping the choice
+    // self-consistent and the menu unchanged (one row per tier).
+    const tier = model.reasoning === undefined ? modelTier(model) : null;
+    const reasoning = model.reasoning === undefined
+      ? matchedReasoning ?? (tier ? { efforts: [{ id: tier.id, name: tier.name }], defaultEffort: tier.id } : undefined)
+      : undefined;
     return {
       ...model,
       ...(Number.isInteger(contextWindow) ? { contextWindow } : {}),
       ...(Number.isInteger(maxTokens) ? { maxTokens } : {}),
       ...(inputModalities?.length ? { inputModalities: [...inputModalities] } : {}),
+      ...(reasoning === undefined ? {} : { reasoning }),
     };
   });
 }

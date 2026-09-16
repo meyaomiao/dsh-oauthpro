@@ -5757,15 +5757,19 @@ function registryMatch(model, registry) {
 function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
     const match = registryMatch(model, registry);
-    if (!match) return model;
-    const contextWindow = finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length);
-    const maxTokens = finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens);
-    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : Array.isArray(match.input) ? match.input : void 0;
+    const matchedReasoning = match && typeof match.reasoning === "object" && !Array.isArray(match.reasoning) ? match.reasoning : void 0;
+    if (!match && model.reasoning !== void 0) return model;
+    const contextWindow = match ? finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length) : void 0;
+    const maxTokens = match ? finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens) : void 0;
+    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : match && Array.isArray(match.input) ? match.input : void 0;
+    const tier = model.reasoning === void 0 ? modelTier(model) : null;
+    const reasoning = model.reasoning === void 0 ? matchedReasoning ?? (tier ? { efforts: [{ id: tier.id, name: tier.name }], defaultEffort: tier.id } : void 0) : void 0;
     return {
       ...model,
       ...Number.isInteger(contextWindow) ? { contextWindow } : {},
       ...Number.isInteger(maxTokens) ? { maxTokens } : {},
-      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {}
+      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {},
+      ...reasoning === void 0 ? {} : { reasoning }
     };
   });
 }
