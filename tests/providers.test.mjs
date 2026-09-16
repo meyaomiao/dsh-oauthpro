@@ -1132,6 +1132,8 @@ test("Antigravity catalog loader never reports a failed read while a previous ca
 });
 
 test("provider model metadata exposes only returned reasoning tiers", () => {
+  // Tier suffixes live in the id, so parse must not declare a second selector
+  // (Refs #65). Non-tier rows are unaffected.
   assert.deepEqual(parseAntigravityModelCatalog([
     "Fetching available models...",
     "gemini-live-low\tGemini Live (Low)",
@@ -1139,42 +1141,9 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
     "gemini-live-high\tGemini Live (High)",
     "claude-live\tClaude Live (Thinking)",
   ].join("\n")), [
-    {
-      id: "gemini-live-low",
-      name: "Gemini Live (Low)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "low",
-      },
-    },
-    {
-      id: "gemini-live-medium",
-      name: "Gemini Live (Medium)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "medium",
-      },
-    },
-    {
-      id: "gemini-live-high",
-      name: "Gemini Live (High)",
-      reasoning: {
-        efforts: [
-          { id: "low", name: "Low" },
-          { id: "medium", name: "Medium" },
-          { id: "high", name: "High" },
-        ],
-        defaultEffort: "high",
-      },
-    },
+    { id: "gemini-live-low", name: "Gemini Live (Low)" },
+    { id: "gemini-live-medium", name: "Gemini Live (Medium)" },
+    { id: "gemini-live-high", name: "Gemini Live (High)" },
     { id: "claude-live", name: "Claude Live (Thinking)" },
   ]);
 
@@ -1191,6 +1160,58 @@ test("provider model metadata exposes only returned reasoning tiers", () => {
   });
 });
 
+test("Antigravity tier rows declare their own effort when the registry is unavailable", () => {
+  // Account-scoped catalog reads were observed without registry metadata, which
+  // left every row bare. DSH then rejects any stored reasoningEffort outright
+  // (`UNSUPPORTED_REASONING_EFFORT`) even though the effort is exactly the tier
+  // the row already encodes — every antigravity conversation carrying an effort
+  // became unusable. The row therefore declares the single effort it is.
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+    "claude-live\tClaude Live (Thinking)",
+  ].join("\n"));
+  assert.deepEqual(enrichAntigravityModelCatalog(live, []).map((model) => [model.id, model.reasoning]), [
+    ["gemini-3.8-flash-high", { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" }],
+    ["gemini-3.8-flash-low", { efforts: [{ id: "low", name: "Low" }], defaultEffort: "low" }],
+    // No tier in the id, nothing to declare: a row that never had a reasoning
+    // control must not grow one.
+    ["claude-live", undefined],
+  ]);
+});
+
+test("Antigravity keeps the registry's own reasoning tiers when it provides them", () => {
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+  ].join("\n"));
+  const registry = [{
+    id: "gemini-3.8-flash",
+    reasoning: {
+      efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }, { id: "low", name: "Low" }],
+      defaultEffort: "high",
+    },
+  }];
+  assert.deepEqual(enrichAntigravityModelCatalog(live, registry)[0].reasoning, {
+    efforts: [{ id: "high", name: "High" }, { id: "medium", name: "Medium" }, { id: "low", name: "Low" }],
+    defaultEffort: "high",
+  });
+});
+
+test("Antigravity never declares an empty reasoning effort list", () => {
+  // DSH rejects `efforts: []` with INVALID_MODEL_REASONING, so the fallback must
+  // either declare a real effort or leave the field out entirely.
+  const live = parseAntigravityModelCatalog([
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "claude-live\tClaude Live (Thinking)",
+  ].join("\n"));
+  for (const model of enrichAntigravityModelCatalog(live, [])) {
+    if (model.reasoning !== undefined) assert.ok(model.reasoning.efforts.length > 0);
+    if (model.reasoning?.defaultEffort !== undefined) {
+      assert.ok(model.reasoning.efforts.some((effort) => effort.id === model.reasoning.defaultEffort));
+    }
+  }
+});
+
 test("Antigravity capacity metadata is enriched only from a live-compatible registry family", () => {
   const live = parseAntigravityModelCatalog([
     "gemini-3.6-flash-high\tGemini 3.6 Flash (High)",
@@ -1205,30 +1226,18 @@ test("Antigravity capacity metadata is enriched only from a live-compatible regi
     {
       id: "gemini-3.6-flash-high",
       name: "Gemini 3.6 Flash (High)",
-      reasoning: {
-        efforts: [
-          { id: "high", name: "High" },
-          { id: "medium", name: "Medium" },
-        ],
-        defaultEffort: "high",
-      },
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
+      reasoning: { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" },
     },
     {
       id: "gemini-3.6-flash-medium",
       name: "Gemini 3.6 Flash (Medium)",
-      reasoning: {
-        efforts: [
-          { id: "high", name: "High" },
-          { id: "medium", name: "Medium" },
-        ],
-        defaultEffort: "medium",
-      },
       contextWindow: 1048576,
       maxTokens: 65536,
       inputModalities: ["text", "image"],
+      reasoning: { efforts: [{ id: "medium", name: "Medium" }], defaultEffort: "medium" },
     },
   ]);
   assert.deepEqual(enrichAntigravityModelCatalog(live, [{ id: "gemini-3.7-flash" }])[0].contextWindow, undefined);
@@ -1514,6 +1523,264 @@ test("Antigravity maps the CLI read_url_content tool into DSH web_fetch", async 
     },
     { type: "finish", reason: { kind: "tool-calls" } },
   ]);
+});
+
+test("Antigravity maps the CLI's read_url spelling into DSH web_fetch", async () => {
+  // Same capability as read_url_content, different name in the CLI payload;
+  // reproduced from a real denial (`user denied permission for read_url
+  // "design.momotoken.win"`). Before the alias existed the name matched neither
+  // the request's tools nor the translation map, so no tool-call was emitted and
+  // the anchored turn ended empty — then got retried twice as a deterministic
+  // failure.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url",
+          tool_info: {
+            name: "read_url",
+            parameters: { url: "https://design.momotoken.win/#video" },
+          },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "look at my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://design.momotoken.win/#video" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity accepts a capitalized Url parameter on the read_url spelling", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_url",
+          tool_info: { name: "read_url", parameters: { Url: "https://moiraism.org" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://moiraism.org" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity does not forward an unmapped CLI tool through a read alias", async () => {
+  // Aliasing must not widen: a name whose canonical form is unmapped stays
+  // unmapped. `write_file` is deliberately not translated (the CLI is expected
+  // to hold the file grant), so it must not be smuggled into `web_fetch`-like
+  // forwarding — the turn keeps the existing silent-run behaviour instead.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "write_file",
+          tool_info: { name: "write_file", parameters: { path: "/tmp/x.txt" } },
+        },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", text: "done" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "write a file" }] }],
+    },
+  });
+  await assert.rejects(async () => {
+    for await (const _chunk of stream) { /* drain */ }
+  }, (error) => error.code === "ANTIGRAVITY_CLI_NO_OUTPUT");
+});
+
+test("Antigravity maps the CLI's CamelCase ReadUrlContent spelling into DSH web_fetch", async () => {
+  // The spelling that actually reaches the driver in the wild: the CLI's own
+  // permission log and generic step confirmation say
+  // `soft-denying tool confirmation "ReadUrlContent"` (agy 1.2.3). The
+  // translation table is snake_case, so a case-sensitive lookup returned null,
+  // emitted no tool-call, and left the turn empty — every page read then cost
+  // one empty anchored run plus two retries before degrading.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "ReadUrlContent",
+          tool_info: { name: "ReadUrlContent", parameters: { Url: "https://design.momotoken.win/" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "web_fetch", description: "Fetch a URL", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "look at my site" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "block-end", index: 0, block: { type: "text", text: "" } },
+    { type: "block-start", index: 1, blockType: "tool-call" },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: chunks[3].block.id,
+        name: "web_fetch",
+        arguments: JSON.stringify({ url: "https://design.momotoken.win/" }),
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("Antigravity normalizes CamelCase CLI names for the other translated tools too", async () => {
+  for (const [cliName, target, parameters, expected] of [
+    ["RunCommand", "bash", { command: "ls -la" }, { command: "ls -la" }],
+    ["SearchWeb", "web_search", { query: "momotoken" }, { queries: ["momotoken"] }],
+  ]) {
+    const executor = createAntigravityCliExecutor({
+      cliPath: "agy-test",
+      detectFakeIp: async () => false,
+      streamCommandRunner: async function* () {
+        yield JSON.stringify({
+          event: "step_update",
+          step_update: {
+            state: "ACTIVE",
+            step_type: "tool",
+            tool_name: cliName,
+            tool_info: { name: cliName, parameters },
+          },
+        });
+        throw new Error("the bridge should stop after forwarding the tool call");
+      },
+    });
+    const stream = await executor({
+      request: {
+        model: "gemini-live-medium",
+        tools: [{ name: target, description: "", parameters: {} }],
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      },
+    });
+    const calls = [];
+    try {
+      for await (const chunk of stream) {
+        if (chunk.block?.type === "tool-call") calls.push(chunk.block);
+      }
+    } catch { /* forwarding throws by design in this harness */ }
+    assert.equal(calls.length, 1, `${cliName} should forward exactly one tool call`);
+    assert.equal(calls[0].name, target);
+    const forwarded = JSON.parse(calls[0].arguments);
+    for (const [key, value] of Object.entries(expected)) assert.deepEqual(forwarded[key], value);
+  }
+});
+
+test("Antigravity still forwards a request-declared tool name unchanged", async () => {
+  // Guard against over-normalizing: the raw name keeps winning the exact match,
+  // so a request that declares a tool in the CLI's casing is untouched.
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    detectFakeIp: async () => false,
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "bash",
+          tool_info: { name: "bash", parameters: { command: "echo hi" } },
+        },
+      });
+      yield JSON.stringify({ event: "result", result: { status: "SUCCESS", text: "done" } });
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    },
+  });
+  const calls = [];
+  try {
+    for await (const chunk of stream) {
+      if (chunk.block?.type === "tool-call") calls.push(chunk.block);
+    }
+  } catch { /* silent-run guard */ }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "bash");
+  assert.deepEqual(JSON.parse(calls[0].arguments).command, "echo hi");
 });
 
 test("Antigravity reads URLs through curl when the proxy answers DNS with fake IPs", async () => {

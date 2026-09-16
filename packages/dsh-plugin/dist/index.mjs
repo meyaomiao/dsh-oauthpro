@@ -5681,30 +5681,7 @@ function parseAntigravityModelCatalog(output) {
     const [id, ...nameParts] = line.split("	");
     return { id, name: nameParts.join("	") || id };
   }).filter((model) => model.id);
-  const families = /* @__PURE__ */ new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? /* @__PURE__ */ new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id
-      }
-    };
-  });
+  return rows;
 }
 function registryModels(value) {
   if (Array.isArray(value)) return value;
@@ -5772,22 +5749,27 @@ function registryMatch(model, registry) {
   const exact = candidates.find((candidate2) => candidate2.id === model.id);
   if (exact) return exact;
   const family = candidates[0];
-  if (!family || !model.reasoning?.efforts?.length) return null;
+  if (!family) return null;
   const suffix = model.id.slice(family.id.length + 1);
-  return model.reasoning.efforts.some((effort) => normalizeToken(effort.id) === normalizeToken(suffix)) ? family : null;
+  const tier = modelTier(model);
+  return tier && normalizeToken(tier.id) === normalizeToken(suffix) ? family : null;
 }
 function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
     const match = registryMatch(model, registry);
-    if (!match) return model;
-    const contextWindow = finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length);
-    const maxTokens = finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens);
-    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : Array.isArray(match.input) ? match.input : void 0;
+    const matchedReasoning = match && typeof match.reasoning === "object" && !Array.isArray(match.reasoning) ? match.reasoning : void 0;
+    if (!match && model.reasoning !== void 0) return model;
+    const contextWindow = match ? finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length) : void 0;
+    const maxTokens = match ? finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens) : void 0;
+    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : match && Array.isArray(match.input) ? match.input : void 0;
+    const tier = model.reasoning === void 0 ? modelTier(model) : null;
+    const reasoning = model.reasoning === void 0 ? matchedReasoning ?? (tier ? { efforts: [{ id: tier.id, name: tier.name }], defaultEffort: tier.id } : void 0) : void 0;
     return {
       ...model,
       ...Number.isInteger(contextWindow) ? { contextWindow } : {},
       ...Number.isInteger(maxTokens) ? { maxTokens } : {},
-      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {}
+      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {},
+      ...reasoning === void 0 ? {} : { reasoning }
     };
   });
 }
@@ -5949,9 +5931,9 @@ function createAntigravityCatalogLoader({
   return loadCatalog;
 }
 function familyPrefixForModel(model) {
-  const defaultEffort = model?.reasoning?.defaultEffort;
-  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
-  const suffix = `-${defaultEffort}`;
+  const tier = modelTier(model);
+  if (!tier || typeof model?.id !== "string") return null;
+  const suffix = `-${tier.id}`;
   return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
 }
 async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
@@ -6355,6 +6337,20 @@ var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   read_url_content: "web_fetch",
   search_web: "web_search"
 });
+var ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
+  read_url: "read_url_content"
+});
+function antigravitySnakeToolName(providerToolName) {
+  return String(providerToolName ?? "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").toLowerCase();
+}
+function antigravityCanonicalToolName(providerToolName) {
+  const normalized = antigravitySnakeToolName(providerToolName);
+  if (ANTIGRAVITY_TOOL_ALIASES[normalized] !== void 0) return ANTIGRAVITY_TOOL_ALIASES[normalized];
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[normalized] ? normalized : providerToolName;
+}
+function antigravityTranslatedToolName(providerToolName) {
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)] ?? null;
+}
 var FAKE_IP_PROBE_HOST = "example.com";
 var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
 var fakeIpCache = /* @__PURE__ */ new Map();
@@ -6489,7 +6485,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  const translated = antigravityTranslatedToolName(providerToolName);
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -6505,7 +6501,8 @@ function toolCallFromEvent(payload, request, options = {}) {
   if (!target) return null;
   const raw = update.tool_info?.parameters;
   const parameters = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
-  if (providerName2 === "run_command" && target.name === "bash") {
+  const canonicalProviderName = antigravityCanonicalToolName(providerName2);
+  if (canonicalProviderName === "run_command" && target.name === "bash") {
     const command = parameters.command ?? parameters.CommandLine;
     if (typeof command === "string" && command.length > 0) {
       return {
@@ -6523,7 +6520,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (providerName2 === "read_url_content" && target.name === "web_fetch") {
+  if (canonicalProviderName === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
@@ -6539,7 +6536,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (providerName2 === "search_web" && target.name === "web_search") {
+  if ((canonicalProviderName === "search_web" || canonicalProviderName === "web_search") && target.name === "web_search") {
     const query = parameters.query ?? parameters.Query ?? parameters.q;
     const queries = Array.isArray(parameters.queries) ? parameters.queries : typeof query === "string" && query.trim().length > 0 ? [query.trim()] : [];
     if (queries.length > 0) {
