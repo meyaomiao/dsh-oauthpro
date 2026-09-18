@@ -29,6 +29,7 @@ export {
   antigravityMessagesFingerprint,
   antigravityPromptInvocation,
   antigravityRepeatRatio,
+  antigravityToolProgressLine,
   isAntigravitySidebandRequest,
   antigravityRequestPrompt,
   createAntigravityConversationStore,

@@ -3673,7 +3673,7 @@ import { lookup } from "node:dns/promises";
 import { copyFileSync, existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname3, join as join6 } from "node:path";
+import { basename, dirname as dirname3, join as join6 } from "node:path";
 import { createInterface } from "node:readline";
 
 // packages/providers/src/cli-agent-transport.mjs
@@ -6556,6 +6556,73 @@ function toolCallFromEvent(payload, request, options = {}) {
     id: String(update.tool_info?.call_id ?? update.call_id ?? `agy-${hash2(JSON.stringify({ update, requestId: request.requestId ?? "" })).slice(0, 20)}`)
   };
 }
+function progressPathLeaf(value) {
+  const text4 = String(value ?? "").trim();
+  if (!text4) return "";
+  try {
+    const leaf = basename(text4.replace(/\\/g, "/"));
+    return leaf || text4;
+  } catch {
+    return text4;
+  }
+}
+function antigravityToolProgressLine(update) {
+  if (!update || update.step_type !== "tool") return null;
+  const state = String(update.state ?? "").toUpperCase();
+  if (state !== "ACTIVE" && state !== "ERROR") return null;
+  const params = update.tool_info?.parameters && typeof update.tool_info.parameters === "object" && !Array.isArray(update.tool_info.parameters) ? update.tool_info.parameters : {};
+  const name2 = String(update.tool_name ?? update.tool_info?.name ?? "tool").trim() || "tool";
+  const rawDetail = String(
+    params.toolSummary ?? params.toolAction ?? params.Query ?? params.query ?? params.CommandLine ?? params.command ?? params.Url ?? params.url ?? params.AbsolutePath ?? params.SearchPath ?? ""
+  ).replace(/\s+/g, " ").trim();
+  const looksLikePath = /[\\/]/.test(rawDetail) && !/\s/.test(rawDetail);
+  const detail = looksLikePath ? progressPathLeaf(rawDetail) : rawDetail.slice(0, 80);
+  if (state === "ERROR") {
+    const err = String(update.tool_info?.error?.message ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+    return `\u5931\u8D25 ${[name2, detail, err].filter(Boolean).join("  ")}`.slice(0, 160);
+  }
+  return (detail ? `${name2}  ${detail}` : name2).slice(0, 160);
+}
+function createAntigravityProgressPump({ reasoningIndex = 1 } = {}) {
+  let open2 = false;
+  let used = false;
+  let text4 = "";
+  const seen = /* @__PURE__ */ new Set();
+  return {
+    get open() {
+      return open2;
+    },
+    get used() {
+      return used;
+    },
+    get text() {
+      return text4;
+    },
+    *line(raw) {
+      const line = String(raw ?? "").trim();
+      if (!line || seen.has(line)) return;
+      seen.add(line);
+      used = true;
+      if (!open2) {
+        open2 = true;
+        yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
+      }
+      const chunk = text4 ? `
+${line}` : line;
+      text4 += chunk;
+      yield { type: "reasoning-delta", index: reasoningIndex, text: chunk };
+    },
+    *fromStep(update) {
+      const line = antigravityToolProgressLine(update);
+      if (line) yield* this.line(line);
+    },
+    *close() {
+      if (!open2) return;
+      open2 = false;
+      yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text: text4 } };
+    }
+  };
+}
 function appendDelta(current, next) {
   if (!next) return "";
   if (!current) return next;
@@ -6646,6 +6713,7 @@ function createAntigravityCliExecutor({
       let usage = null;
       let stepUsage = null;
       const handledTools = /* @__PURE__ */ new Set();
+      const progress = createAntigravityProgressPump();
       const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
@@ -6679,11 +6747,13 @@ function createAntigravityCliExecutor({
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
           if (handledTools.has(key)) continue;
           handledTools.add(key);
+          yield* progress.close();
           yield { type: "block-end", index: 0, block: { type: "text", text: text4 } };
-          yield { type: "block-start", index: 1, blockType: "tool-call" };
+          const toolIndex = progress.used ? 2 : 1;
+          yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
           yield {
             type: "block-end",
-            index: 1,
+            index: toolIndex,
             block: {
               type: "tool-call",
               id: tool.id,
@@ -6696,9 +6766,11 @@ function createAntigravityCliExecutor({
           yield { type: "finish", reason: { kind: "tool-calls" } };
           return;
         }
+        yield* progress.fromStep(parsed?.step_update);
         for (const delta of streamEventTexts(parsed)) {
           const next = appendDelta(text4, delta);
           if (!next) continue;
+          yield* progress.close();
           text4 += next;
           yield { type: "text-delta", index: 0, text: next };
         }
@@ -6708,6 +6780,7 @@ function createAntigravityCliExecutor({
           if (final.status && final.status !== "SUCCESS") {
             const detail = typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "");
             if (text4.trim().length === 0) {
+              yield* progress.close();
               const error = new Error("Antigravity CLI request did not complete");
               error.code = "ANTIGRAVITY_CLI_FAILED";
               error.detail = detail || final.text || null;
@@ -6716,6 +6789,7 @@ function createAntigravityCliExecutor({
             const note = `
 
 > \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            yield* progress.close();
             text4 += note;
             yield { type: "text-delta", index: 0, text: note };
           }
@@ -6724,6 +6798,7 @@ function createAntigravityCliExecutor({
             next = "";
           }
           if (next) {
+            yield* progress.close();
             text4 += next;
             yield { type: "text-delta", index: 0, text: next };
           }
@@ -6734,6 +6809,7 @@ function createAntigravityCliExecutor({
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
+      yield* progress.close();
       if (text4.trim().length === 0) {
         if (request.signal?.aborted) {
           const aborted = new Error("Antigravity CLI run was cancelled");
@@ -6793,6 +6869,7 @@ ${request.system}
       let text4 = "";
       let usage = null;
       let seenConversationId = null;
+      const progress = createAntigravityProgressPump();
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
         timeoutMs,
@@ -6814,9 +6891,11 @@ ${request.system}
           }
         }
         seenConversationId = seenConversationId ?? parsed.conversation_id ?? parsed.result?.conversation_id ?? parsed.step_update?.conversation_id ?? null;
+        yield* progress.fromStep(stepUpdate);
         for (const delta of streamEventTexts(parsed)) {
           const next = appendDelta(text4, delta);
           if (!next) continue;
+          yield* progress.close();
           text4 += next;
           yield { type: "text-delta", index: 0, text: next };
         }
@@ -6830,6 +6909,7 @@ ${request.system}
             const detail = `${typeof final.error === "string" ? final.error : JSON.stringify(final.error ?? "")} | ${JSON.stringify(diagnostics.deniedActions).slice(0, 300)}`;
             appendAntigravityAnchorLog(anchorLogFile, { kind: "anchored_failed", sessionKey, cid, diagnostics, textLen: text4.length, detail: detail.slice(0, 300) });
             if (text4.trim().length === 0) {
+              yield* progress.close();
               const error = new Error("Antigravity CLI request did not complete");
               error.code = "ANTIGRAVITY_CLI_FAILED";
               error.detail = detail;
@@ -6838,6 +6918,7 @@ ${request.system}
             const note = `
 
 > \u26A0\uFE0F \u672C\u8F6E\u88AB\u4E0A\u6E38\u4E2D\u65AD\uFF08${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}\uFF09\uFF0C\u4EE5\u4E0A\u4E3A\u5DF2\u751F\u6210\u7684\u90E8\u5206\u5185\u5BB9\u3002`;
+            yield* progress.close();
             text4 += note;
             yield { type: "text-delta", index: 0, text: note };
           }
@@ -6846,6 +6927,7 @@ ${request.system}
             next = "";
           }
           if (next) {
+            yield* progress.close();
             text4 += next;
             yield { type: "text-delta", index: 0, text: next };
           }
@@ -6853,6 +6935,7 @@ ${request.system}
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
+      yield* progress.close();
       if (text4.trim().length === 0 || request.signal?.aborted) {
         appendAntigravityAnchorLog(anchorLogFile, {
           kind: "anchored_empty",
