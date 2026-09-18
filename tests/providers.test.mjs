@@ -28,6 +28,7 @@ import {
   createAntigravityConversationStore,
   antigravityHistoryImport,
   antigravityRepeatRatio,
+  antigravityToolProgressLine,
   isAntigravitySidebandRequest,
   createAntigravityCliExecutor,
   createAntigravityDriver,
@@ -3940,4 +3941,168 @@ test("Antigravity mirrors write_file so implementation turns are not auto-denied
   // Denial observed in the wild: "user denied permission for write_file(...)"
   // while the agent was implementing a plan.
   assert.ok(ANTIGRAVITY_DEFAULT_ALLOW_RULES.includes("write_file(/)"));
+});
+
+test("Antigravity tool progress lines use the summary or a path leaf", () => {
+  assert.equal(
+    antigravityToolProgressLine({
+      step_type: "tool",
+      state: "ACTIVE",
+      tool_name: "view_file",
+      tool_info: {
+        parameters: {
+          AbsolutePath: "/Users/xzb/Documents/dsh-oauthpro/modules/provider-antigravity/src/driver.mjs",
+          toolSummary: "Inspect driver.mjs",
+        },
+      },
+    }),
+    "view_file  Inspect driver.mjs",
+  );
+  assert.equal(
+    antigravityToolProgressLine({
+      step_type: "tool",
+      state: "ACTIVE",
+      tool_name: "grep_search",
+      tool_info: { parameters: { SearchPath: "/Users/xzb/src", Query: "tool result for" } },
+    }),
+    "grep_search  tool result for",
+  );
+  assert.equal(
+    antigravityToolProgressLine({
+      step_type: "tool",
+      state: "DONE",
+      tool_name: "view_file",
+      tool_info: { parameters: { toolSummary: "Inspect driver.mjs" } },
+    }),
+    null,
+  );
+  assert.match(
+    antigravityToolProgressLine({
+      step_type: "tool",
+      state: "ERROR",
+      tool_name: "read_url",
+      tool_info: { error: { message: "user denied permission for read_url(example.com)" } },
+    }),
+    /^失败 read_url/,
+  );
+});
+
+test("Antigravity session-anchor paints unmapped tool steps as reasoning, not DSH tool-calls", async () => {
+  // Observed: a 3-minute gemini-3.8-flash-high turn ran ~40 agy-owned tools
+  // (view_file / grep_search) and the UI stayed blank until the final dump.
+  // Progress must stream without flipping into the DSH tool loop (that would
+  // kill agy and replay the prompt once per file).
+  const dir = await mkdtemp(join(tmpdir(), "agy-progress-"));
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({ event: "init", conversation_id: "cid-progress" });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "view_file",
+          tool_info: {
+            parameters: {
+              AbsolutePath: "/tmp/driver.mjs",
+              toolSummary: "Inspect driver.mjs",
+            },
+          },
+        },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "DONE",
+          step_type: "tool",
+          tool_name: "view_file",
+          tool_info: { parameters: { toolSummary: "Inspect driver.mjs" } },
+        },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "view_file",
+          tool_info: {
+            parameters: {
+              AbsolutePath: "/tmp/driver.mjs",
+              toolSummary: "Inspect driver.mjs",
+            },
+          },
+        },
+      });
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "agent_response",
+          text_delta: "终稿可见",
+        },
+      });
+      yield JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "cid-progress",
+          status: "SUCCESS",
+          response: "终稿可见",
+          usage: { input_tokens: 10, output_tokens: 2 },
+        },
+      });
+    },
+    conversationStore: createAntigravityConversationStore({ file: join(dir, "convs.json") }),
+    anchorLogPath: join(dir, "anchor.log"),
+    settingsFile: join(dir, "settings.json"),
+  });
+  const stream = await executor({
+    request: {
+      sessionId: "dsh-session-progress",
+      messages: [{ role: "user", content: [{ type: "text", text: "继续测试" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const reasoning = chunks.filter((c) => c.type === "reasoning-delta").map((c) => c.text).join("");
+  const text = chunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+  assert.match(reasoning, /view_file  Inspect driver\.mjs/);
+  assert.equal(reasoning.split("view_file").length - 1, 1, "ACTIVE+DONE+repeat ACTIVE must print once");
+  assert.equal(text, "终稿可见");
+  assert.equal(chunks.some((c) => c.type === "finish" && c.reason?.kind === "tool-calls"), false);
+  assert.equal(chunks.at(-1).reason.kind, "stop");
+  const reasoningStart = chunks.findIndex((c) => c.type === "block-start" && c.blockType === "reasoning");
+  const firstReasoning = chunks.findIndex((c) => c.type === "reasoning-delta");
+  const firstText = chunks.findIndex((c) => c.type === "text-delta");
+  assert.ok(reasoningStart >= 0 && firstReasoning > reasoningStart && firstText > firstReasoning);
+});
+
+test("Antigravity legacy path still forwards mapped tools and does not paint them as progress", async () => {
+  const executor = createAntigravityCliExecutor({
+    cliPath: "agy-test",
+    streamCommandRunner: async function* () {
+      yield JSON.stringify({
+        event: "step_update",
+        step_update: {
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_info: { parameters: { CommandLine: "pwd" } },
+        },
+      });
+      throw new Error("the bridge should stop after forwarding the tool call");
+    },
+  });
+  const stream = await executor({
+    request: {
+      model: "gemini-live-medium",
+      tools: [{ name: "bash", description: "Execute bash", parameters: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "check" }] }],
+    },
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(chunks.filter((c) => c.type === "reasoning-delta").length, 0);
+  assert.equal(chunks.at(-1).reason.kind, "tool-calls");
+  assert.equal(chunks.find((c) => c.block?.type === "tool-call")?.block.name, "bash");
 });
