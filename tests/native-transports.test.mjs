@@ -14,6 +14,7 @@ import { bytesField, encodeAgentRunRequest, frameConnectMessage, stringField } f
 import {
   fetchNativeResponse,
   nativeProviderError,
+  normalizeUsage,
   readSseEvents,
   validateNativeEndpoint,
 } from "../packages/providers/src/native-transport.mjs";
@@ -170,6 +171,111 @@ test("native transports frame reasoning blocks with matching start and end event
   const antigravityChunks = await collect(await antigravity({ request: { model: "gemini", messages: [{ role: "user", content: "hi" }] } }));
   const antigravityReasoning = antigravityChunks.filter((chunk) => chunk.index === 1 && ["block-start", "reasoning-delta", "block-end"].includes(chunk.type));
   assert.deepEqual(antigravityReasoning.map((chunk) => chunk.type), ["block-start", "reasoning-delta", "block-end"]);
+});
+
+test("normalizeUsage peels OpenAI/xAI cached tokens out of prompt_tokens", () => {
+  // Session sample: uncached 2858 + cache 369664 = prompt 372522; + output 600 = total 373122.
+  assert.deepEqual(normalizeUsage({
+    prompt_tokens: 372522,
+    completion_tokens: 600,
+    total_tokens: 373122,
+    prompt_tokens_details: { cached_tokens: 369664 },
+  }), {
+    inputTokens: 2858,
+    outputTokens: 600,
+    totalTokens: 373122,
+    cacheReadTokens: 369664,
+  });
+  assert.deepEqual(normalizeUsage({
+    prompt_tokens: 372522,
+    completion_tokens: 600,
+    details: { cache_read_tokens: 369664 },
+  }), {
+    inputTokens: 2858,
+    outputTokens: 600,
+    cacheReadTokens: 369664,
+  });
+  assert.deepEqual(normalizeUsage({
+    prompt_tokens: 372522,
+    completion_tokens: 600,
+    cache_read_tokens: 369664,
+  }), {
+    inputTokens: 2858,
+    outputTokens: 600,
+    cacheReadTokens: 369664,
+  });
+  assert.deepEqual(normalizeUsage({
+    prompt_tokens: 100,
+    completion_tokens: 5,
+    prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 4 },
+  }), {
+    inputTokens: 16,
+    outputTokens: 5,
+    cacheReadTokens: 80,
+    cacheWriteTokens: 4,
+  });
+  // Already-normalized TokenUsage must not be subtracted twice.
+  assert.deepEqual(normalizeUsage({
+    inputTokens: 2858,
+    outputTokens: 600,
+    cacheReadTokens: 369664,
+    totalTokens: 373122,
+  }), {
+    inputTokens: 2858,
+    outputTokens: 600,
+    totalTokens: 373122,
+    cacheReadTokens: 369664,
+  });
+  // Anthropic / Gemini keep uncached input disjoint from cache-read.
+  assert.deepEqual(normalizeUsage({
+    input_tokens: 100,
+    output_tokens: 10,
+    cache_read_input_tokens: 20,
+    cache_creation_input_tokens: 5,
+  }), {
+    inputTokens: 100,
+    outputTokens: 10,
+    cacheReadTokens: 20,
+    cacheWriteTokens: 5,
+  });
+  assert.deepEqual(normalizeUsage({
+    promptTokenCount: 12,
+    candidatesTokenCount: 5,
+    totalTokenCount: 17,
+    cachedContentTokenCount: 3,
+  }), {
+    inputTokens: 12,
+    outputTokens: 5,
+    totalTokens: 17,
+    cacheReadTokens: 3,
+  });
+});
+
+test("Grok native transport records xAI prompt cache hits", async () => {
+  const grok = createGrokNativeExecutor({
+    endpoint: "https://grok.test/v1/chat/completions",
+    fetchImpl: async () => responseFor([
+      { choices: [{ delta: { content: "answer" }, finish_reason: "stop" }] },
+      {
+        usage: {
+          prompt_tokens: 372522,
+          completion_tokens: 600,
+          total_tokens: 373122,
+          prompt_tokens_details: { cached_tokens: 369664 },
+        },
+      },
+    ]),
+  });
+  const chunks = await collect(await grok({
+    request: { model: "grok-4.6", messages: [{ role: "user", content: "hi" }] },
+    credential: { access: "token" },
+  }));
+  assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, {
+    inputTokens: 2858,
+    outputTokens: 600,
+    totalTokens: 373122,
+    cacheReadTokens: 369664,
+  });
 });
 
 test("Antigravity native transport uses streamGenerateContent SSE", async () => {

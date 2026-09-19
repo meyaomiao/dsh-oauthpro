@@ -4287,15 +4287,66 @@ async function* readSseEvents(response) {
     nativeResponseControls.delete(response);
   }
 }
+function finiteNumber2(...candidates) {
+  for (const candidate2 of candidates) {
+    const parsed = Number(candidate2);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Number.NaN;
+}
+function objectOf(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function firstPresent(value, keys) {
+  for (const key of keys) {
+    if (Object.hasOwn(value, key) && value[key] != null) return { key, value: value[key] };
+  }
+  return null;
+}
 function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const inputTokens = Number(value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens ?? value.promptTokenCount);
-  const outputTokens = Number(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens ?? value.candidatesTokenCount);
-  const totalTokens = Number(value.total_tokens ?? value.totalTokens ?? value.totalTokenCount);
-  const cacheReadTokens = Number(value.cache_read_input_tokens ?? value.cacheReadInputTokens ?? value.cachedContentTokenCount);
-  const cacheWriteTokens = Number(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens);
+  const details = objectOf(value.prompt_tokens_details) ?? objectOf(value.promptTokensDetails) ?? objectOf(value.details);
+  const inputField = firstPresent(value, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "promptTokenCount"]);
+  const inputTokens = Number(inputField?.value);
+  const outputTokens = finiteNumber2(
+    value.output_tokens,
+    value.outputTokens,
+    value.completion_tokens,
+    value.completionTokens,
+    value.candidatesTokenCount
+  );
+  const totalTokens = finiteNumber2(value.total_tokens, value.totalTokens, value.totalTokenCount);
+  const disjointCacheRead = finiteNumber2(
+    value.cache_read_input_tokens,
+    value.cacheReadInputTokens,
+    value.cachedContentTokenCount
+  );
+  const includedCacheRead = finiteNumber2(
+    details?.cached_tokens,
+    details?.cachedTokens,
+    details?.cache_read_tokens,
+    details?.cacheReadTokens,
+    value.prompt_cache_hit_tokens,
+    value.cached_tokens,
+    value.cache_read_tokens,
+    value.cacheReadTokens
+  );
+  const cacheReadTokens = Number.isFinite(disjointCacheRead) ? disjointCacheRead : includedCacheRead;
+  const cacheWriteTokens = finiteNumber2(
+    value.cache_creation_input_tokens,
+    value.cacheCreationInputTokens,
+    details?.cache_write_tokens,
+    details?.cacheWriteTokens,
+    value.cache_write_tokens,
+    value.cacheWriteTokens
+  );
+  const promptIncludesCache = inputField?.key === "prompt_tokens" || inputField?.key === "promptTokens";
   const result = {};
-  if (Number.isFinite(inputTokens)) result.inputTokens = inputTokens;
+  if (Number.isFinite(inputTokens)) {
+    const cacheRead = Number.isFinite(cacheReadTokens) ? cacheReadTokens : 0;
+    const cacheWrite = Number.isFinite(cacheWriteTokens) ? cacheWriteTokens : 0;
+    result.inputTokens = promptIncludesCache ? Math.max(0, inputTokens - cacheRead - cacheWrite) : inputTokens;
+  }
   if (Number.isFinite(outputTokens)) result.outputTokens = outputTokens;
   if (Number.isFinite(totalTokens)) result.totalTokens = totalTokens;
   if (Number.isFinite(cacheReadTokens)) result.cacheReadTokens = cacheReadTokens;
