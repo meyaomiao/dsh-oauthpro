@@ -118,6 +118,25 @@ OAuth 类 provider(Codex 等)不填 Key,在弹窗里点登录走浏览器授权�
 | Linux | ✅ 核心全量 | 授权页自动打开(`xdg-open`) |
 | Cursor / Antigravity 桌面凭证扫描 | macOS 专属 | 其他平台自动跳过,回退 env 等替代源 |
 
+## ⚠️ 供应商与模型使用限制
+
+### Antigravity (Google) & Gemini 3.7 系列
+
+1. **登录前置依赖（必须安装官方 `agy` CLI）**：
+   - Antigravity 采用官方 CLI 的隔离 profile 完成 Google OAuth 授权。**系统必须已安装 `agy`** 且处于 `$PATH` 中（安装：`curl -fsSL https://antigravity.google/cli/install.sh | bash`，默认落盘至 `~/.local/bin/agy`）。
+   - 若未安装 `agy`，点击“添加登录账号”时**浏览器不会弹出登录页面**，并报错：`agy 官方验证未完成（退出码 1）`。
+   - 若将 `agy` 安装在非标准目录，可通过环境变量显式配置：`export DOCKYARD_ANTIGRAVITY_CLI="/path/to/your/agy"`。
+   - **授权弹窗交互**：为避免与 `agy` CLI 争抢弹窗导致授权页重复打开，DSH 界面针对 Antigravity 禁用了预开占位窗口，浏览器由后台 `agy` 进程拉起。
+2. **凭证扫描平台限制**：
+   - 本地已有会话与 Keychain 扫描属于 **macOS 专属**（自动从 `login.keychain-db` 读取已保存的 `gemini`/`antigravity` 凭证）；Windows / Linux 环境无法读取 macOS 钥匙串，需通过 `agy` 登录或使用 `DOCKYARD_ANTIGRAVITY_TOKEN_FILE` / `DOCKYARD_ANTIGRAVITY_ACCESS_TOKEN`。
+3. **模型协议与思考签名（Thought Signatures）限制**：
+   - 模型通过 Google 原生 Code Assist `streamGenerateContent?alt=sse` 链路调用。
+   - **Gemini 3 系列**（如 `gemini-3.7-flash`）强制要求多轮会话中的工具调用携带思考签名；若历史记录中存在未签名的工具调用，插件会自动降级为纯文本提示，防止被 Google API 报 400 错误拦截（老版本 `gemini-2.5-flash` 免除签名校验）。
+4. **上下文滑动窗口限制**：
+   - 模型虽具备 1M tokens 上下文能力，但为避免深轮次对话引起端到端延迟剧增或服务端网关超时，插件默认启用 40 条消息滑动窗口，超出部分会自动压缩合并中间轮次，保留首轮设定与最新活跃轮次。
+5. **官方配额限制**：
+   - 依赖 Google Cloud Code Assist 账号配额，遇到配额耗尽需等待 Google 官方配额窗口重置。
+
 ## 🛠 开发
 
 ```bash
