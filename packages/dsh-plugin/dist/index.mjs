@@ -5808,15 +5808,19 @@ function registryMatch(model, registry) {
 function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
     const match = registryMatch(model, registry);
-    if (!match) return model;
-    const contextWindow = finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length);
-    const maxTokens = finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens);
-    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : Array.isArray(match.input) ? match.input : void 0;
+    const matchedReasoning = match && typeof match.reasoning === "object" && !Array.isArray(match.reasoning) ? match.reasoning : void 0;
+    if (!match && model.reasoning !== void 0) return model;
+    const contextWindow = match ? finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length) : void 0;
+    const maxTokens = match ? finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens) : void 0;
+    const inputModalities = Array.isArray(model.inputModalities) ? model.inputModalities : match && Array.isArray(match.input) ? match.input : void 0;
+    const tier = model.reasoning === void 0 ? modelTier(model) : null;
+    const reasoning = model.reasoning === void 0 ? matchedReasoning ?? (tier ? { efforts: [{ id: tier.id, name: tier.name }], defaultEffort: tier.id } : void 0) : void 0;
     return {
       ...model,
       ...Number.isInteger(contextWindow) ? { contextWindow } : {},
       ...Number.isInteger(maxTokens) ? { maxTokens } : {},
-      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {}
+      ...inputModalities?.length ? { inputModalities: [...inputModalities] } : {},
+      ...reasoning === void 0 ? {} : { reasoning }
     };
   });
 }
@@ -6387,9 +6391,16 @@ var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
 var ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
   read_url: "read_url_content"
 });
+function antigravitySnakeToolName(providerToolName) {
+  return String(providerToolName ?? "").replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").toLowerCase();
+}
 function antigravityCanonicalToolName(providerToolName) {
-  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
-  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+  const normalized = antigravitySnakeToolName(providerToolName);
+  if (ANTIGRAVITY_TOOL_ALIASES[normalized] !== void 0) return ANTIGRAVITY_TOOL_ALIASES[normalized];
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[normalized] ? normalized : providerToolName;
+}
+function antigravityTranslatedToolName(providerToolName) {
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)] ?? null;
 }
 var FAKE_IP_PROBE_HOST = "example.com";
 var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
@@ -6525,7 +6536,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
+  const translated = antigravityTranslatedToolName(providerToolName);
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -6541,7 +6552,8 @@ function toolCallFromEvent(payload, request, options = {}) {
   if (!target) return null;
   const raw = update.tool_info?.parameters;
   const parameters = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
-  if (providerName2 === "run_command" && target.name === "bash") {
+  const canonicalProviderName = antigravityCanonicalToolName(providerName2);
+  if (canonicalProviderName === "run_command" && target.name === "bash") {
     const command = parameters.command ?? parameters.CommandLine;
     if (typeof command === "string" && command.length > 0) {
       return {
@@ -6559,7 +6571,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (antigravityCanonicalToolName(providerName2) === "read_url_content" && target.name === "web_fetch") {
+  if (canonicalProviderName === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
@@ -6575,7 +6587,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (providerName2 === "search_web" && target.name === "web_search") {
+  if ((canonicalProviderName === "search_web" || canonicalProviderName === "web_search") && target.name === "web_search") {
     const query = parameters.query ?? parameters.Query ?? parameters.q;
     const queries = Array.isArray(parameters.queries) ? parameters.queries : typeof query === "string" && query.trim().length > 0 ? [query.trim()] : [];
     if (queries.length > 0) {

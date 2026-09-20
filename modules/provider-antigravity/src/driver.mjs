@@ -610,17 +610,39 @@ function registryMatch(model, registry) {
 export function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
     const match = registryMatch(model, registry);
-    if (!match) return model;
-    const contextWindow = finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length);
-    const maxTokens = finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens);
+    const matchedReasoning = match && typeof match.reasoning === "object" && !Array.isArray(match.reasoning)
+      ? match.reasoning
+      : undefined;
+    if (!match && model.reasoning !== undefined) return model;
+    const contextWindow = match
+      ? finiteNumber(model.contextWindow ?? match.contextWindow ?? match.context_window ?? match.context_length)
+      : undefined;
+    const maxTokens = match
+      ? finiteNumber(model.maxTokens ?? match.maxTokens ?? match.max_tokens ?? match.max_output_tokens)
+      : undefined;
     const inputModalities = Array.isArray(model.inputModalities)
       ? model.inputModalities
-      : Array.isArray(match.input) ? match.input : undefined;
+      : match && Array.isArray(match.input) ? match.input : undefined;
+    // A row whose tier is encoded in its id (and mirrored in its label) always
+    // declares that tier back to DSH. DSH strips the tier from
+    // `reasoning.efforts` on purpose (Refs #65) — but a model with no
+    // `reasoning` at all makes DSH reject any stored effort outright
+    // (`UNSUPPORTED_REASONING_EFFORT`), and DSH's own client persists an
+    // `reasoningEffort` per selection. When the registry happens to be
+    // unavailable this left the account-scoped catalog with bare rows, so every
+    // antigravity conversation carrying an effort became unusable. The fallback
+    // declares the single effort the row actually is, keeping the choice
+    // self-consistent and the menu unchanged (one row per tier).
+    const tier = model.reasoning === undefined ? modelTier(model) : null;
+    const reasoning = model.reasoning === undefined
+      ? matchedReasoning ?? (tier ? { efforts: [{ id: tier.id, name: tier.name }], defaultEffort: tier.id } : undefined)
+      : undefined;
     return {
       ...model,
       ...(Number.isInteger(contextWindow) ? { contextWindow } : {}),
       ...(Number.isInteger(maxTokens) ? { maxTokens } : {}),
       ...(inputModalities?.length ? { inputModalities: [...inputModalities] } : {}),
+      ...(reasoning === undefined ? {} : { reasoning }),
     };
   });
 }
@@ -1438,24 +1460,67 @@ const ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
 });
 
 /**
- * CLI spellings that mean the same tool as a name the translation map already
- * covers. `read_url` is the one observed in the wild: agy 1.2.3 emits it for a
- * page read (`user denied permission for read_url "design.momotoken.win"`),
- * while the map only knew `read_url_content`. An unresolved name costs more
- * than a missing translation: `toolCallFromEvent` returns null, no tool-call is
+ * The vocabulary the CLI and DSH share, in the direction the wiring needs it.
+ *
+ * `ANTIGRAVITY_TOOL_TRANSLATIONS` names the DSH tool each capability maps to.
+ * This map normalizes the *other* spellings onto a name DSH also uses, so the
+ * existing per-tool branches in {@link toolCallFromEvent} keep deciding the
+ * argument shape:
+ *
+ * - `read_url` — agy 1.2.3's own denial text names the page read this way
+ *   (`user denied permission for read_url "design.momotoken.win"`) while the
+ *   streamed payload says `read_url_content`. It is *not* already a translation
+ *   key, which is exactly why an alias is needed; a name that is already a key
+ *   (like `search_web`) must never be aliased away, or the capability becomes
+ *   unreachable through the table's own vocabulary.
+ *
+ * An unresolved name costs more than a missing translation: no tool-call is
  * emitted, the turn ends with no visible text, and an empty anchored run is
- * retried twice before degrading to the slow replay path — ~180s spent on a
- * deterministic permission denial. Aliasing keeps the CLI's vocabulary in one
- * place without inventing new authority: an alias never resolves unless its
- * canonical name is already mapped.
+ * retried twice before degrading to the slow replay path — for a page read that
+ * was ~180s spent on a deterministic permission denial. Normalizing here keeps
+ * the CLI's vocabulary in one place without inventing authority: every alias
+ * still resolves through `ANTIGRAVITY_TOOL_TRANSLATIONS`, which only returns
+ * tools the request already declares.
  */
 const ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
   read_url: "read_url_content",
 });
 
+/**
+ * Normalize a CLI tool name to the shared snake_case vocabulary.
+ *
+ * The CLI spells the same tool differently across builds and transports:
+ * `read_url_content` in the streamed payload, `ReadUrlContent` in its own
+ * permission log and in the generic step confirmation
+ * (`tool_confirmation_manager: soft-denying tool confirmation "ReadUrlContent"`).
+ * Matching only one spelling is not cosmetic: a case-mismatched lookup returned
+ * null, so a page read silently cost one empty anchored run plus two retries.
+ * Only the lookup normalizes; the raw name still wins the exact match in
+ * {@link requestTool}, so a request declaring a tool in this casing is
+ * unaffected.
+ */
+function antigravitySnakeToolName(providerToolName) {
+  return String(providerToolName ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+/**
+ * Resolve a CLI tool name to the closest name DSH also uses: the alias target
+ * when one exists, otherwise the normalized name when the translation table
+ * knows it. Unknown names keep their raw spelling so unrelated CLI tools are
+ * never folded onto a capability they do not mean.
+ */
 function antigravityCanonicalToolName(providerToolName) {
-  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
-  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+  const normalized = antigravitySnakeToolName(providerToolName);
+  if (ANTIGRAVITY_TOOL_ALIASES[normalized] !== undefined) return ANTIGRAVITY_TOOL_ALIASES[normalized];
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[normalized] ? normalized : providerToolName;
+}
+
+/** The DSH tool a capability name translates to, or null when it is unmapped. */
+function antigravityTranslatedToolName(providerToolName) {
+  return ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)] ?? null;
 }
 
 /**
@@ -1650,7 +1715,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
+  const translated = antigravityTranslatedToolName(providerToolName);
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -1667,7 +1732,8 @@ function toolCallFromEvent(payload, request, options = {}) {
   if (!target) return null;
   const raw = update.tool_info?.parameters;
   const parameters = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
-  if (providerName === "run_command" && target.name === "bash") {
+  const canonicalProviderName = antigravityCanonicalToolName(providerName);
+  if (canonicalProviderName === "run_command" && target.name === "bash") {
     const command = parameters.command ?? parameters.CommandLine;
     if (typeof command === "string" && command.length > 0) {
       return {
@@ -1690,7 +1756,7 @@ function toolCallFromEvent(payload, request, options = {}) {
   // parameter, or — same capability, different spelling — under `read_url`
   // with a lowercase `url`; DSH's `web_fetch` takes `url`. Both spellings are
   // accepted here so the canonical name alone decides the branch.
-  if (antigravityCanonicalToolName(providerName) === "read_url_content" && target.name === "web_fetch") {
+  if (canonicalProviderName === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
@@ -1708,7 +1774,7 @@ function toolCallFromEvent(payload, request, options = {}) {
   }
   // The CLI searches with a single `query` string; DSH's `web_search` takes a
   // required `queries` array (1–4 entries).
-  if (providerName === "search_web" && target.name === "web_search") {
+  if ((canonicalProviderName === "search_web" || canonicalProviderName === "web_search") && target.name === "web_search") {
     const query = parameters.query ?? parameters.Query ?? parameters.q;
     const queries = Array.isArray(parameters.queries)
       ? parameters.queries
