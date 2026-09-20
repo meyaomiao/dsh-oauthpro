@@ -6384,6 +6384,13 @@ var ANTIGRAVITY_TOOL_TRANSLATIONS = Object.freeze({
   read_url_content: "web_fetch",
   search_web: "web_search"
 });
+var ANTIGRAVITY_TOOL_ALIASES = Object.freeze({
+  read_url: "read_url_content"
+});
+function antigravityCanonicalToolName(providerToolName) {
+  const alias = ANTIGRAVITY_TOOL_ALIASES[providerToolName];
+  return alias && ANTIGRAVITY_TOOL_TRANSLATIONS[alias] ? alias : providerToolName;
+}
 var FAKE_IP_PROBE_HOST = "example.com";
 var FAKE_IP_CACHE_TTL_MS = 5 * 60 * 1e3;
 var fakeIpCache = /* @__PURE__ */ new Map();
@@ -6518,7 +6525,7 @@ function requestTool(request, providerToolName) {
   const tools = Array.isArray(request?.tools) ? request.tools : [];
   const exact = tools.find((tool) => tool?.name === providerToolName);
   if (exact) return { name: exact.name, definition: exact };
-  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[providerToolName];
+  const translated = ANTIGRAVITY_TOOL_TRANSLATIONS[antigravityCanonicalToolName(providerToolName)];
   if (translated) {
     const target = tools.find((tool) => tool?.name === translated);
     if (target) return { name: target.name, definition: target };
@@ -6552,7 +6559,7 @@ function toolCallFromEvent(payload, request, options = {}) {
       };
     }
   }
-  if (providerName2 === "read_url_content" && target.name === "web_fetch") {
+  if (antigravityCanonicalToolName(providerName2) === "read_url_content" && target.name === "web_fetch") {
     const url = parameters.url ?? parameters.Url ?? parameters.URL ?? parameters.uri;
     if (typeof url === "string" && url.length > 0) {
       if (options.preferLocalUrlFetch && requestTool(request, "bash") !== null) {
