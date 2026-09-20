@@ -496,31 +496,12 @@ export function parseAntigravityModelCatalog(output) {
     })
     .filter((model) => model.id);
 
-  const families = new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id,
-      },
-    };
-  });
+  // Tier rows keep their tier in the id (`gemini-3.8-flash-high`). Declaring
+  // `reasoning.efforts` on them made DSH render a SECOND selector whose choice
+  // is either silently ignored (native transport) or merely remapped back to the
+  // id-encoded tier (CLI transport). Publishing the rows as plain models lets
+  // the menu offer each tier exactly once. Refs #65.
+  return rows;
 }
 
 function registryModels(value) {
@@ -608,16 +589,16 @@ function registryMatch(model, registry) {
   const exact = candidates.find((candidate) => candidate.id === model.id);
   if (exact) return exact;
 
-  // A live provider row may encode a returned reasoning tier in its model id
-  // (for example, a family row ending in the provider-returned effort id).
-  // Only use a registry family match when that suffix is itself present in
-  // the live catalog's effort set; this avoids guessing across unrelated ids.
+  // A live provider row may encode its tier in the model id (for example,
+  // `gemini-3.6-flash-high` for the `gemini-3.6-flash` family). Since #65 the
+  // tier is no longer mirrored into `reasoning.efforts`, so the suffix is
+  // validated against the row's own id/label tier instead — the same strict
+  // check that keeps unrelated ids from being folded into a family.
   const family = candidates[0];
-  if (!family || !model.reasoning?.efforts?.length) return null;
+  if (!family) return null;
   const suffix = model.id.slice(family.id.length + 1);
-  return model.reasoning.efforts.some((effort) => normalizeToken(effort.id) === normalizeToken(suffix))
-    ? family
-    : null;
+  const tier = modelTier(model);
+  return tier && normalizeToken(tier.id) === normalizeToken(suffix) ? family : null;
 }
 
 /**
@@ -818,10 +799,18 @@ export function createAntigravityCatalogLoader({
   return loadCatalog;
 }
 
+/**
+ * Family prefix for a tier-suffixed row, derived from the id itself.
+ *
+ * This used to require `reasoning.defaultEffort`, which #65 removed from tier
+ * rows. The id/name tier check (`modelTier`) is if anything stricter: the row is
+ * only treated as a tier when its parenthesised label equals its id suffix, so
+ * an unrelated id can never be folded into another family.
+ */
 function familyPrefixForModel(model) {
-  const defaultEffort = model?.reasoning?.defaultEffort;
-  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
-  const suffix = `-${defaultEffort}`;
+  const tier = modelTier(model);
+  if (!tier || typeof model?.id !== "string") return null;
+  const suffix = `-${tier.id}`;
   return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
 }
 

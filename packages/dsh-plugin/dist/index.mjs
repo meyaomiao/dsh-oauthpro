@@ -5732,30 +5732,7 @@ function parseAntigravityModelCatalog(output) {
     const [id, ...nameParts] = line.split("	");
     return { id, name: nameParts.join("	") || id };
   }).filter((model) => model.id);
-  const families = /* @__PURE__ */ new Map();
-  for (const model of rows) {
-    const tier = modelTier(model);
-    if (!tier) continue;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId) ?? /* @__PURE__ */ new Map();
-    family.set(tier.id, tier);
-    families.set(familyId, family);
-  }
-  return rows.map((model) => {
-    const tier = modelTier(model);
-    if (!tier) return model;
-    const familyId = model.id.slice(0, -(tier.id.length + 1));
-    const family = families.get(familyId);
-    if (!family || family.size < 2) return model;
-    const efforts = [...family.values()];
-    return {
-      ...model,
-      reasoning: {
-        efforts: efforts.map((effort) => ({ id: effort.id, name: effort.name })),
-        defaultEffort: tier.id
-      }
-    };
-  });
+  return rows;
 }
 function registryModels(value) {
   if (Array.isArray(value)) return value;
@@ -5823,9 +5800,10 @@ function registryMatch(model, registry) {
   const exact = candidates.find((candidate2) => candidate2.id === model.id);
   if (exact) return exact;
   const family = candidates[0];
-  if (!family || !model.reasoning?.efforts?.length) return null;
+  if (!family) return null;
   const suffix = model.id.slice(family.id.length + 1);
-  return model.reasoning.efforts.some((effort) => normalizeToken(effort.id) === normalizeToken(suffix)) ? family : null;
+  const tier = modelTier(model);
+  return tier && normalizeToken(tier.id) === normalizeToken(suffix) ? family : null;
 }
 function enrichAntigravityModelCatalog(models, registry) {
   return (Array.isArray(models) ? models : []).map((model) => {
@@ -6000,9 +5978,9 @@ function createAntigravityCatalogLoader({
   return loadCatalog;
 }
 function familyPrefixForModel(model) {
-  const defaultEffort = model?.reasoning?.defaultEffort;
-  if (typeof defaultEffort !== "string" || defaultEffort.length === 0) return null;
-  const suffix = `-${defaultEffort}`;
+  const tier = modelTier(model);
+  if (!tier || typeof model?.id !== "string") return null;
+  const suffix = `-${tier.id}`;
   return model.id.endsWith(suffix) ? model.id.slice(0, -suffix.length) : null;
 }
 async function resolveAntigravityInvocationModel({ catalogLoader, model, reasoningEffort } = {}) {
