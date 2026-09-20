@@ -21,7 +21,7 @@ test("published package.json description is not macOS-only", async () => {
   const root = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const plugin = JSON.parse(await readFile(join(repoRoot, "packages/dsh-plugin/package.json"), "utf8"));
   for (const [label, pkg] of [["root", root], ["plugin", plugin]]) {
-    assert.equal(pkg.version, "0.1.5", `${label} version`);
+    assert.equal(pkg.version, "0.1.6", `${label} version`);
     assert.match(pkg.description, /dsh-oauthpro/i, `${label} description`);
     assert.doesNotMatch(pkg.description, /macOS-only/i, `${label} description still says macOS-only`);
     assert.match(pkg.description, /Windows/i, `${label} description should mention Windows`);

@@ -1,6 +1,6 @@
 {
   "name": "dsh-oauthpro",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "dsh-oauthpro — provider account pool & quota plugin for DeepSeek Harness (Codex/Claude/Cursor/Grok/Antigravity/GLM), live model catalog + balance/quota, macOS/Windows/Linux",
   "license": "MIT",
   "type": "module",
@@ -60,13 +60,27 @@
     "@earendil-works/pi-ai": ">=0.85.1"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-api-remotes": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-model-selection": { "optional": true },
-    "@deepseek-ai/dsh-llm": { "optional": true },
-    "@deepseek-ai/dsh-llm-pi-ai": { "optional": true },
-    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
-    "@earendil-works/pi-ai": { "optional": true }
+    "@deepseek-ai/dsh-api-remotes": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-model-selection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/dsh-api-remotes": ">=0.1.5-rc.2",
