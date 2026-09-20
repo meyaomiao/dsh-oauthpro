@@ -4,7 +4,7 @@ import { lookup } from "node:dns/promises";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
@@ -1796,6 +1796,93 @@ function toolCallFromEvent(payload, request, options = {}) {
   };
 }
 
+function progressPathLeaf(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  try {
+    const leaf = basename(text.replace(/\\/g, "/"));
+    return leaf || text;
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * One visible progress line for an agy tool step. Display only: never a DSH
+ * tool-call. ACTIVE is the start of work; ERROR is a failure footnote; DONE
+ * is omitted so the same step does not print twice.
+ */
+export function antigravityToolProgressLine(update) {
+  if (!update || update.step_type !== "tool") return null;
+  const state = String(update.state ?? "").toUpperCase();
+  if (state !== "ACTIVE" && state !== "ERROR") return null;
+  const params = update.tool_info?.parameters && typeof update.tool_info.parameters === "object"
+    && !Array.isArray(update.tool_info.parameters)
+    ? update.tool_info.parameters
+    : {};
+  const name = String(update.tool_name ?? update.tool_info?.name ?? "tool").trim() || "tool";
+  const rawDetail = String(
+    params.toolSummary
+      ?? params.toolAction
+      ?? params.Query
+      ?? params.query
+      ?? params.CommandLine
+      ?? params.command
+      ?? params.Url
+      ?? params.url
+      ?? params.AbsolutePath
+      ?? params.SearchPath
+      ?? "",
+  ).replace(/\s+/g, " ").trim();
+  const looksLikePath = /[\\/]/.test(rawDetail) && !/\s/.test(rawDetail);
+  const detail = looksLikePath ? progressPathLeaf(rawDetail) : rawDetail.slice(0, 80);
+  if (state === "ERROR") {
+    const err = String(update.tool_info?.error?.message ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+    return `失败 ${[name, detail, err].filter(Boolean).join("  ")}`.slice(0, 160);
+  }
+  return (detail ? `${name}  ${detail}` : name).slice(0, 160);
+}
+
+function createAntigravityProgressPump({ reasoningIndex = 1 } = {}) {
+  let open = false;
+  let used = false;
+  let text = "";
+  const seen = new Set();
+  return {
+    get open() {
+      return open;
+    },
+    get used() {
+      return used;
+    },
+    get text() {
+      return text;
+    },
+    *line(raw) {
+      const line = String(raw ?? "").trim();
+      if (!line || seen.has(line)) return;
+      seen.add(line);
+      used = true;
+      if (!open) {
+        open = true;
+        yield { type: "block-start", index: reasoningIndex, blockType: "reasoning" };
+      }
+      const chunk = text ? `\n${line}` : line;
+      text += chunk;
+      yield { type: "reasoning-delta", index: reasoningIndex, text: chunk };
+    },
+    *fromStep(update) {
+      const line = antigravityToolProgressLine(update);
+      if (line) yield* this.line(line);
+    },
+    *close() {
+      if (!open) return;
+      open = false;
+      yield { type: "block-end", index: reasoningIndex, block: { type: "reasoning", text } };
+    },
+  };
+}
+
 function appendDelta(current, next) {
   if (!next) return "";
   if (!current) return next;
@@ -1917,6 +2004,10 @@ export function createAntigravityCliExecutor({
       // call still reports what it actually consumed.
       let stepUsage = null;
       const handledTools = new Set();
+      // Unmapped agy tools (view_file / grep_search / …) stay owned by the
+      // CLI; surface them as reasoning progress so the UI is not blank for
+      // minutes. Mapped tools still flip into the DSH tool loop below.
+      const progress = createAntigravityProgressPump();
       // Print mode explains itself on stderr (e.g. an auto-denied tool) and then
       // exits 0 with an empty response; keep a bounded copy for the diagnosis.
       const diagnostics = { stderr: "", deniedActions: [], events: 0, steps: 0, toolErrors: [], resultStatus: null };
@@ -1962,11 +2053,13 @@ export function createAntigravityCliExecutor({
           const key = `${tool.id}:${tool.name}:${JSON.stringify(tool.arguments)}`;
           if (handledTools.has(key)) continue;
           handledTools.add(key);
+          yield* progress.close();
           yield { type: "block-end", index: 0, block: { type: "text", text } };
-          yield { type: "block-start", index: 1, blockType: "tool-call" };
+          const toolIndex = progress.used ? 2 : 1;
+          yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
           yield {
             type: "block-end",
-            index: 1,
+            index: toolIndex,
             block: {
               type: "tool-call",
               id: tool.id,
@@ -1982,9 +2075,11 @@ export function createAntigravityCliExecutor({
           yield { type: "finish", reason: { kind: "tool-calls" } };
           return;
         }
+        yield* progress.fromStep(parsed?.step_update);
         for (const delta of streamEventTexts(parsed)) {
           const next = appendDelta(text, delta);
           if (!next) continue;
+          yield* progress.close();
           text += next;
           yield { type: "text-delta", index: 0, text: next };
         }
@@ -1996,12 +2091,14 @@ export function createAntigravityCliExecutor({
             // Same rule as the anchored path: never discard text the user can
             // already see when the upstream drops the stream mid-answer.
             if (text.trim().length === 0) {
+              yield* progress.close();
               const error = new Error("Antigravity CLI request did not complete");
               error.code = "ANTIGRAVITY_CLI_FAILED";
               error.detail = detail || final.text || null;
               throw error;
             }
             const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            yield* progress.close();
             text += note;
             yield { type: "text-delta", index: 0, text: note };
           }
@@ -2015,6 +2112,7 @@ export function createAntigravityCliExecutor({
             next = "";
           }
           if (next) {
+            yield* progress.close();
             text += next;
             yield { type: "text-delta", index: 0, text: next };
           }
@@ -2025,6 +2123,7 @@ export function createAntigravityCliExecutor({
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
+      yield* progress.close();
       // Whitespace-only text is not visible content downstream either, so it
       // must take the same single-failure path as a fully empty run.
       if (text.trim().length === 0) {
@@ -2103,12 +2202,14 @@ export function createAntigravityCliExecutor({
       }
       // agy owns tool execution in this mode (design §4.2/§8): the sandbox and
       // its own permission settings govern commands, so tool step_updates are
-      // never forwarded into the DSH tool loop.
+      // never forwarded into the DSH tool loop. They are still painted as
+      // reasoning progress so a 3-minute tool-heavy turn is not a blank UI.
       args.push("--sandbox", "--print-timeout", `${printTimeoutSeconds}s`, "--output-format", "stream-json");
       yield { type: "block-start", index: 0, blockType: "text" };
       let text = "";
       let usage = null;
       let seenConversationId = null;
+      const progress = createAntigravityProgressPump();
       for await (const line of streamCommandRunner(cliPath, args, {
         env,
         timeoutMs,
@@ -2134,9 +2235,11 @@ export function createAntigravityCliExecutor({
           ?? parsed.result?.conversation_id
           ?? parsed.step_update?.conversation_id
           ?? null;
+        yield* progress.fromStep(stepUpdate);
         for (const delta of streamEventTexts(parsed)) {
           const next = appendDelta(text, delta);
           if (!next) continue;
+          yield* progress.close();
           text += next;
           yield { type: "text-delta", index: 0, text: next };
         }
@@ -2154,12 +2257,14 @@ export function createAntigravityCliExecutor({
             // "EOF") after most of the answer has been generated. Keep what the
             // user can see and say why the run ended.
             if (text.trim().length === 0) {
+              yield* progress.close();
               const error = new Error("Antigravity CLI request did not complete");
               error.code = "ANTIGRAVITY_CLI_FAILED";
               error.detail = detail;
               throw error;
             }
             const note = `\n\n> ⚠️ 本轮被上游中断（${String(diagnostics.stderr || detail).replace(/\s+/g, " ").trim().slice(0, 160)}），以上为已生成的部分内容。`;
+            yield* progress.close();
             text += note;
             yield { type: "text-delta", index: 0, text: note };
           }
@@ -2173,6 +2278,7 @@ export function createAntigravityCliExecutor({
             next = "";
           }
           if (next) {
+            yield* progress.close();
             text += next;
             yield { type: "text-delta", index: 0, text: next };
           }
@@ -2180,6 +2286,7 @@ export function createAntigravityCliExecutor({
         }
         usage = usageFromResponse(parsed.usage) ?? usage;
       }
+      yield* progress.close();
       if (text.trim().length === 0 || request.signal?.aborted) {
         appendAntigravityAnchorLog(anchorLogFile, {
           kind: "anchored_empty", sessionKey, cid, diagnostics, textLen: text.length,
