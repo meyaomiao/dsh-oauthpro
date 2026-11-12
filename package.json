@@ -1,6 +1,6 @@
 {
   "name": "dsh-oauthpro",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "dsh-oauthpro — provider account pool & quota plugin for DeepSeek Harness (Codex/Claude/Cursor/Grok/Antigravity/GLM), live model catalog + balance/quota, macOS/Windows/Linux",
   "license": "MIT",
   "type": "module",
@@ -52,12 +52,12 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-api-remotes": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-model-selection": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.2",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.1.5-rc.2",
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-model-selection": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.5-rc.2 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2",
     "@earendil-works/pi-ai": ">=0.85.1"
   },
   "peerDependenciesMeta": {
